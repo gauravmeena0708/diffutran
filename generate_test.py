@@ -23,8 +23,19 @@ def load_model(checkpoint_path, preprocessor_path, condition_encoder_path=None,
     condition_encoder = None
     num_classes = None
     if condition_encoder_path and os.path.exists(condition_encoder_path):
-        import joblib
-        condition_encoder = joblib.load(condition_encoder_path)
+        from sklearn.preprocessing import LabelEncoder
+        condition_encoder = LabelEncoder()
+
+        # Safe loading from JSON
+        if condition_encoder_path.endswith('.json'):
+            with open(condition_encoder_path, 'r') as f:
+                classes = json.load(f)
+            condition_encoder.classes_ = np.array(classes)
+        else:
+            # Fallback for old format if necessary, though new format is preferred
+            import joblib
+            condition_encoder = joblib.load(condition_encoder_path)
+
         num_classes = len(condition_encoder.classes_)
     
     # Checkpoint

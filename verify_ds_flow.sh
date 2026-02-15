@@ -18,7 +18,7 @@ python3 ds_flow/train.py \
 echo "Step 2: Generation..."
 python3 ds_flow/sampler.py \
   --checkpoint_path "$SAVE_DIR/model_final.pt" \
-  --tokenizer_path "$SAVE_DIR/tokenizer.joblib" \
+  --tokenizer_path "$SAVE_DIR/tokenizer.pt" \
   --output_dir $OUTPUT_DIR \
   --num_samples 20 \
   --steps 10 \
