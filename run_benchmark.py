@@ -16,6 +16,7 @@ from evaluation.metrics import EvaluationFramework
 from ds_flow.config import DSFlowConfig
 from ds_flow.models.dual_stream import DualStreamTransformer
 from ds_flow.models.flow_matching import OTCFM
+from ds_flow.data.tokenizer import QuantileTokenizer
 from generate_test import load_model as load_model_1, generate_synthetic_data as generate_model_1
 from models.gaussian_diffusion import GaussianDiffusion
 
