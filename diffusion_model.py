@@ -149,7 +149,7 @@ class DiffusionTransformer(nn.Module):
         return output
 
 
-class GaussianDiffusion:
+class GaussianDiffusion(nn.Module):
     """
     Gaussian Diffusion process for training and sampling.
     Uses DDPM (Denoising Diffusion Probabilistic Models) formulation.
@@ -161,28 +161,36 @@ class GaussianDiffusion:
         beta_end=0.02,
         schedule_type='linear'
     ):
+        super().__init__()
         self.num_timesteps = num_timesteps
         
         # Define beta schedule
         if schedule_type == 'linear':
-            self.betas = torch.linspace(beta_start, beta_end, num_timesteps)
+            betas = torch.linspace(beta_start, beta_end, num_timesteps)
         elif schedule_type == 'cosine':
-            self.betas = self._cosine_beta_schedule(num_timesteps)
+            betas = self._cosine_beta_schedule(num_timesteps)
         else:
             raise ValueError(f"Unknown schedule type: {schedule_type}")
         
         # Pre-compute diffusion parameters
-        self.alphas = 1.0 - self.betas
-        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
-        self.alphas_cumprod_prev = F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0)
+        alphas = 1.0 - betas
+        alphas_cumprod = torch.cumprod(alphas, dim=0)
+        alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
+
+        # Register all as buffers to avoid redundant CPU-GPU transfers
+        self.register_buffer('betas', betas)
+        self.register_buffer('alphas', alphas)
+        self.register_buffer('alphas_cumprod', alphas_cumprod)
+        self.register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
         
         # Calculations for diffusion q(x_t | x_{t-1})
-        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alphas_cumprod)
+        self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
+        self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1.0 - alphas_cumprod))
+        self.register_buffer('sqrt_recip_alphas', torch.sqrt(1.0 / alphas))
         
         # Calculations for posterior q(x_{t-1} | x_t, x_0)
-        self.posterior_variance = (
-            self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+        self.register_buffer('posterior_variance',
+            betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
         )
         
     def _cosine_beta_schedule(self, timesteps, s=0.008):
@@ -211,7 +219,8 @@ class GaussianDiffusion:
     
     def _extract(self, arr, timesteps, broadcast_shape):
         """Extract values from array at timesteps and reshape"""
-        arr = arr.to(timesteps.device)
+        if arr.device != timesteps.device:
+            arr = arr.to(timesteps.device)
         res = arr.gather(0, timesteps)
         while len(res.shape) < len(broadcast_shape):
             res = res[..., None]
@@ -244,7 +253,7 @@ class GaussianDiffusion:
         sqrt_one_minus_alphas_cumprod_t = self._extract(
             self.sqrt_one_minus_alphas_cumprod, t, x.shape
         )
-        sqrt_recip_alphas_t = self._extract(torch.sqrt(1.0 / self.alphas), t, x.shape)
+        sqrt_recip_alphas_t = self._extract(self.sqrt_recip_alphas, t, x.shape)
         
         # Predict noise
         predicted_noise = model(x, t, condition=condition)
@@ -266,6 +275,7 @@ class GaussianDiffusion:
         """
         Generate samples from the model
         """
+        self.to(device)
         batch_size = shape[0]
         
         # Start from pure noise
