@@ -391,7 +391,7 @@ if __name__ == '__main__':
     parser.add_argument('--m1_heads', type=int, default=8)
     # General
     parser.add_argument('--condition_col', type=str, default='income')
-    parser.add_argument('--limit', type=int, default=10)
+    parser.add_argument('--limit', type=int, default=None)
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--max_samples', type=int, default=1000)
     
