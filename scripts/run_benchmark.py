@@ -9,23 +9,17 @@ import torch
 import joblib
 from tqdm import tqdm
 
-# Add project root
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Add project root to path
+# This allows importing from 'src'
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
-from evaluation.metrics import EvaluationFramework
-from ds_flow.config import DSFlowConfig
-from ds_flow.models.dual_stream import DualStreamTransformer
-from ds_flow.models.flow_matching import OTCFM
-from ds_flow.data.tokenizer import QuantileTokenizer
-from generate_test import load_model as load_model_1, generate_synthetic_data as generate_model_1
-from models.gaussian_diffusion import GaussianDiffusion
-
-# Constants
-REAL_DATA_PATH = "datasets/adult/train.csv"
-BENCHMARK_DIR = "../Project/sd_framework/benchmark_results_20260202"
-CONSTRAINT_FILE = os.path.join(BENCHMARK_DIR, "adult_constraints.json")
-BASELINE_DATA_DIR = os.path.join(BENCHMARK_DIR, "data/adult/single")
-OUTPUT_DIR = "benchmark_results"
+from src.common.evaluation_metrics import EvaluationFramework
+from src.flow_model.config import DSFlowConfig
+from src.flow_model.models.dual_stream import DualStreamTransformer
+from src.flow_model.models.flow_matching import OTCFM
+from src.flow_model.data.tokenizer import QuantileTokenizer
+from src.diffutron.diffusion import GaussianDiffusion
+from generate_test import load_model as load_baseline_model, generate_synthetic_data as generate_baseline_data
 
 def load_ds_flow_model(checkpoint_path, tokenizer_path, condition_encoder_path=None, d_model=512):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -77,20 +71,21 @@ def generate_ds_flow_samples(engine, tokenizer, le_condition, n_samples, constra
     device = next(engine.model.parameters()).device
     generated_df = pd.DataFrame()
     
-    # Determine if we can condition
-    y_cond = None
-    target_class = None
-    
     # Check if constraint involves condition_col
     cols = constraints['columns']
     vals = constraints['values']
     
+    target_class = None
     if condition_col in cols:
         idx = cols.index(condition_col)
         target_val = vals[idx]
-        if le_condition is not None: # Ensure le_condition exists before transforming
-            target_class = le_condition.transform([target_val])[0]
-        
+        if le_condition is not None:
+            # Transform target value to class index
+            try:
+                target_class = le_condition.transform([target_val])[0]
+            except ValueError:
+                 print(f"Warning: Value {target_val} not in condition encoder classes.")
+
     # Generation Loop
     max_iter = 10
     
@@ -99,15 +94,15 @@ def generate_ds_flow_samples(engine, tokenizer, le_condition, n_samples, constra
         if needed <= 0:
             break
             
-        current_batch = max(needed * 2, 100) # Heuristic
+        current_batch = max(needed * 2, 100)
         
-        # Prepare y
+        # Prepare condition y
         y = None
         if le_condition is not None:
             if target_class is not None:
                 y = torch.full((current_batch,), target_class, device=device)
             else:
-                # Random y
+                # Random y if not constrained on condition_col
                 num_cls = len(le_condition.classes_)
                 y = torch.randint(0, num_cls, (current_batch,), device=device)
             
@@ -116,17 +111,14 @@ def generate_ds_flow_samples(engine, tokenizer, le_condition, n_samples, constra
             tokens = engine.sample(current_batch, steps=20, y=y)
             batch_df = tokenizer.inverse_transform(tokens)
             
-        # Add condition col back
-        if condition_col and le_condition is not None:
-            # Only if y was used/generated
-             if y is not None:
-                y_labels = le_condition.inverse_transform(y.cpu().numpy())
-                batch_df[condition_col] = y_labels
+        # Add condition col back if it was handled separately
+        if condition_col and le_condition is not None and y is not None:
+             y_labels = le_condition.inverse_transform(y.cpu().numpy())
+             batch_df[condition_col] = y_labels
             
-        # Filter
+        # Filter by constraints
         mask = pd.Series(True, index=batch_df.index)
         for c_name, c_val in zip(cols, vals):
-            # Ensure type match (string)
             mask &= (batch_df[c_name].astype(str) == str(c_val))
             
         valid_df = batch_df[mask]
@@ -137,18 +129,16 @@ def generate_ds_flow_samples(engine, tokenizer, le_condition, n_samples, constra
         
     return generated_df.head(n_samples)
 
-def generate_model_1_samples(model, preprocessor, diffusion, condition_encoder, n_samples, constraints, condition_col, device):
+def generate_baseline_samples(model, preprocessor, diffusion, condition_encoder, n_samples, constraints, condition_col, device):
     """
-    Generate samples for Model 1.
-    Returns the generated DataFrame and the corresponding condition labels (if any).
+    Generate samples for the Baseline Diffusion Model.
     """
     generated_df = pd.DataFrame()
-    generated_y_labels = []
     
-    target_class = None
     cols = constraints['columns']
     vals = constraints['values']
     
+    target_class = None
     if condition_col and condition_col in cols:
         idx = cols.index(condition_col)
         target_val = vals[idx]
@@ -156,7 +146,6 @@ def generate_model_1_samples(model, preprocessor, diffusion, condition_encoder, 
             target_class = condition_encoder.transform([str(target_val)])[0]
             
     max_iter = 10
-    
     for i in range(max_iter):
         needed = n_samples - len(generated_df)
         if needed <= 0:
@@ -164,7 +153,7 @@ def generate_model_1_samples(model, preprocessor, diffusion, condition_encoder, 
             
         current_batch = max(needed * 2, 100)
         
-        batch_df, start_y = generate_model_1(
+        batch_df, _ = generate_baseline_data(
             model, diffusion, preprocessor, current_batch, 
             guidance_scale=1.0, 
             condition_col=condition_col, 
@@ -180,35 +169,74 @@ def generate_model_1_samples(model, preprocessor, diffusion, condition_encoder, 
             mask &= (batch_df[c_name].astype(str) == str(c_val))
             
         valid_df = batch_df[mask]
-        
-        # Collect y for valid samples
-        if start_y is not None:
-            valid_indices = mask[mask].index
-            # Map original batch indices to start_y indices
-            # This assumes start_y corresponds directly to batch_df rows
-            # If batch_df is re-indexed, this mapping needs to be more robust
-            valid_y = start_y[valid_indices.to_numpy()]
-            generated_y_labels.append(valid_y)
-        
         generated_df = pd.concat([generated_df, valid_df])
         
-    final_df = generated_df.head(n_samples)
-    final_y = None
-    if generated_y_labels:
-        final_y = torch.cat(generated_y_labels)[:len(final_df)]
+    return generated_df.head(n_samples)
+
+def evaluate_generation(real_subset, synthetic_df, method_name, constraint_hash):
+    """
+    Compute Fidelity, Utility, and Privacy metrics for a generated dataset.
+    Returns a dictionary of results.
+    """
+    if len(synthetic_df) < 2:
+        return None
         
-    # Condition column is already added by generate_model_1 (generate_synthetic_data)
+    # Align columns
+    try:
+        common_cols = [c for c in real_subset.columns if c in synthetic_df.columns]
+        if len(common_cols) < len(real_subset.columns):
+            print(f"[{method_name}] Missing columns. Skipping.")
+            return None
+            
+        synthetic_df = synthetic_df[real_subset.columns]
         
-    return final_df, final_y
+        # Subsample real_subset for speed if needed
+        eval_real = real_subset
+        if len(eval_real) > 2000:
+            eval_real = eval_real.sample(2000, random_state=42)
+            
+        evaluator = EvaluationFramework(eval_real, synthetic_df, task_type='classification', target_col='income')
+        
+        # 1. Fidelity
+        fid = evaluator.evaluate_fidelity()
+        wds = [v for k, v in fid.items() if k.startswith('WD')]
+        jsds = [v for k, v in fid.items() if k.startswith('JSD')]
+        mean_wd = np.mean(wds) if wds else 0
+        mean_jsd = np.mean(jsds) if jsds else 0
+        
+        # 2. Utility
+        u_metrics = evaluator.evaluate_utility()
+        
+        # 3. Privacy
+        p_metrics = evaluator.evaluate_privacy(sample_size=min(len(eval_real), 1000))
+        
+        # 4. Global Discriminator
+        d_metrics = evaluator.evaluate_discriminator_measure()
+        
+        return {
+            'Method': method_name,
+            'Hash': constraint_hash,
+            'TSTR': u_metrics.get('TSTR_F1', 0),
+            'TRTR': u_metrics.get('TRTR_F1', 0),
+            'DCR_Mean': p_metrics.get('DCR_Mean', 0),
+            'DCR_5th': p_metrics.get('DCR_5th_Percentile', 0),
+            'Mean_WD': mean_wd,
+            'Mean_JSD': mean_jsd,
+            'Discrim_AUC': d_metrics.get('Discriminator_AUC', 0)
+        }
+    except Exception as e:
+        print(f"Error evaluating {method_name} for {constraint_hash}: {e}")
+        return None
 
 def run_benchmark(args):
     # 1. Load Real Data
-    print("Loading Real Data...")
-    real_df = pd.read_csv(REAL_DATA_PATH)
+    print(f"Loading Real Data from {args.real_data_path}...")
+    real_df = pd.read_csv(args.real_data_path)
     
     # 2. Load Constraints
-    print(f"Loading Constraints from {CONSTRAINT_FILE}...")
-    with open(CONSTRAINT_FILE, 'r') as f:
+    constraint_file = os.path.join(args.benchmark_dir, args.constraints_file)
+    print(f"Loading Constraints from {constraint_file}...")
+    with open(constraint_file, 'r') as f:
         constraints_data = json.load(f)
         
     constraints_list = constraints_data.get('single', []) + constraints_data.get('double', [])
@@ -223,7 +251,7 @@ def run_benchmark(args):
             
     if args.shuffle and not args.target_hash:
         import random
-        random.seed(42)  # For reproducibility, or remove seed if true random wanted
+        random.seed(42)
         random.shuffle(constraints_list)
         print("Shuffled constraints.")
     
@@ -233,18 +261,18 @@ def run_benchmark(args):
         args.ds_checkpoint, args.ds_tokenizer, args.ds_condition_encoder, args.d_model
     )
     
-    print("Loading Model 1 (Diffusion Transformer)...")
-    m1_device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model1, m1_preprocessor, m1_cond_enc = load_model_1(
-        args.m1_checkpoint, 
-        args.m1_preprocessor, 
-        args.m1_condition_encoder,
-        hidden_dim=args.m1_hidden_dim,
-        num_layers=args.m1_layers,
-        num_heads=args.m1_heads,
-        device=m1_device
+    print("Loading Baseline Diffusion (Model 1)...")
+    base_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    base_model, base_preprocessor, base_cond_enc = load_baseline_model(
+        args.baseline_checkpoint, 
+        args.baseline_preprocessor, 
+        args.baseline_condition_encoder,
+        hidden_dim=args.baseline_hidden_dim,
+        num_layers=args.baseline_layers,
+        num_heads=args.baseline_heads,
+        device=base_device
     )
-    m1_diffusion = GaussianDiffusion(num_timesteps=1000)
+    base_diffusion = GaussianDiffusion(num_timesteps=1000)
     
     results = []
     if args.limit:
@@ -261,13 +289,16 @@ def run_benchmark(args):
             real_subset = real_subset[real_subset[c].astype(str) == str(v)]
             
         if len(real_subset) < 10:
-            print(f"Skipping {c_hash}: Not enough real samples.")
+            print(f"Skipping {c_hash}: Not enough real samples ({len(real_subset)}).")
             continue
             
-        target_n = min(len(real_subset), args.max_samples) # Cap at max_samples
+        target_n = min(len(real_subset), args.max_samples)
         
-        # --- A. DS-Flow ---
-        ds_file = os.path.join(OUTPUT_DIR, f"dsflow_adult_{c_hash}.csv")
+        # --- A. Evaluation Loop ---
+        files_to_eval = [] # List of (method_name, dataframe)
+        
+        # 1. DS-Flow
+        ds_file = os.path.join(args.output_dir, f"dsflow_adult_{c_hash}.csv")
         if os.path.exists(ds_file) and not args.overwrite:
             ds_df = pd.read_csv(ds_file)
         else:
@@ -277,208 +308,103 @@ def run_benchmark(args):
                 constraints={'columns': cols, 'values': vals},
                 condition_col=args.condition_col
             )
-            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            os.makedirs(args.output_dir, exist_ok=True)
             ds_df.to_csv(ds_file, index=False)
-        # Metrics DS-Flow
-        if len(ds_df) > 1:
-            # Align columns
-            ds_df = ds_df[real_subset.columns]
             
-            # Subsample real_subset for speed if needed
-            eval_real = real_subset
-            if len(eval_real) > 2000:
-                eval_real = eval_real.sample(2000, random_state=42)
-            
-            try:
-                eval_ds = EvaluationFramework(eval_real, ds_df, task_type='classification', target_col='income')
-                
-                # 1. Fidelity
-                fid = eval_ds.evaluate_fidelity()
-                wds = [v for k, v in fid.items() if k.startswith('WD')]
-                jsds = [v for k, v in fid.items() if k.startswith('JSD')]
-                mean_wd = np.mean(wds) if wds else 0
-                mean_jsd = np.mean(jsds) if jsds else 0
-                
-                # 2. Utility
-                u_metrics = eval_ds.evaluate_utility()
-                
-                # 3. Privacy
-                p_metrics = eval_ds.evaluate_privacy(sample_size=min(len(eval_real), 1000))
-                
-                # 4. Global Discriminator
-                d_metrics = eval_ds.evaluate_discriminator_measure()
-                
-                results.append({
-                    'Method': 'DS-Flow',
-                    'Hash': c_hash,
-                    'TSTR': u_metrics.get('TSTR_F1', 0),
-                    'TRTR': u_metrics.get('TRTR_F1', 0),
-                    'DCR_Mean': p_metrics.get('DCR_Mean', 0),
-                    'DCR_5th': p_metrics.get('DCR_5th_Percentile', 0),
-                    'Mean_WD': mean_wd,
-                    'Mean_JSD': mean_jsd,
-                    'Discrim_AUC': d_metrics.get('Discriminator_AUC', 0)
-                })
-            except Exception as e:
-                print(f"Error evaluating DS-Flow for {c_hash}: {e}")
-            
-        # --- B. Model 1 ---
-        m1_file = os.path.join(OUTPUT_DIR, f"model1_adult_{c_hash}.csv")
-        if os.path.exists(m1_file) and not args.overwrite:
-            m1_df = pd.read_csv(m1_file)
+        files_to_eval.append(('DS-Flow', ds_df))
+        
+        # 2. Baseline Diffusion
+        base_file = os.path.join(args.output_dir, f"baseline_adult_{c_hash}.csv")
+        if os.path.exists(base_file) and not args.overwrite:
+            base_df = pd.read_csv(base_file)
         else:
-            m1_df, _ = generate_model_1_samples(
-                model1, m1_preprocessor, m1_diffusion, m1_cond_enc,
+            base_df = generate_baseline_samples(
+                base_model, base_preprocessor, base_diffusion, base_cond_enc,
                 n_samples=target_n,
                 constraints={'columns': cols, 'values': vals},
                 condition_col=args.condition_col,
-                device=m1_device
+                device=base_device
             )
-            os.makedirs(OUTPUT_DIR, exist_ok=True)
-            m1_df.to_csv(m1_file, index=False)
+            os.makedirs(args.output_dir, exist_ok=True)
+            base_df.to_csv(base_file, index=False)
             
-        if len(m1_df) > 1:
-            # Align columns
-            m1_df = m1_df[real_subset.columns]
-            
-            # Subsample real_subset for speed if needed
-            eval_real = real_subset
-            if len(eval_real) > 2000:
-                eval_real = eval_real.sample(2000, random_state=42)
-            try:
-                eval_m1 = EvaluationFramework(eval_real, m1_df, task_type='classification', target_col='income')
-                
-                # 1. Fidelity
-                fid = eval_m1.evaluate_fidelity()
-                wds = [v for k, v in fid.items() if k.startswith('WD')]
-                jsds = [v for k, v in fid.items() if k.startswith('JSD')]
-                mean_wd = np.mean(wds) if wds else 0
-                mean_jsd = np.mean(jsds) if jsds else 0
-                
-                # 2. Utility
-                u = eval_m1.evaluate_utility()
-                
-                # 3. Privacy
-                p = eval_m1.evaluate_privacy(sample_size=min(len(eval_real), 1000))
-                
-                # 4. Global Discriminator
-                d = eval_m1.evaluate_discriminator_measure()
-                
-                results.append({
-                    'Method': 'Model1',
-                    'Hash': c_hash,
-                    'TSTR': u.get('TSTR_F1', 0),
-                    'TRTR': u.get('TRTR_F1', 0),
-                    'DCR_Mean': p.get('DCR_Mean', 0),
-                    'DCR_5th': p.get('DCR_5th_Percentile', 0),
-                    'Mean_WD': mean_wd,
-                    'Mean_JSD': mean_jsd,
-                    'Discrim_AUC': d.get('Discriminator_AUC', 0)
-                })
-            except Exception as e:
-                print(f"Error evaluating Model 1 for {c_hash}: {e}")
-                
-        # --- C. External Models (Dynamic Discovery) ---
-        # Look in single and double folders
+        files_to_eval.append(('Baseline_Diffusion', base_df))
+        
+        # 3. External Models (Dynamic Discovery)
+        # Search relative to benchmark dir
+        baseline_data_dir = os.path.join(args.benchmark_dir, args.baseline_data_dir)
         search_dirs = [
-            BASELINE_DATA_DIR,
-            BASELINE_DATA_DIR.replace('/single', '/double')
+             baseline_data_dir,
+            baseline_data_dir.replace('/single', '/double') # Naive support for double constraints folder structure
         ]
         
         for s_dir in search_dirs:
             if not os.path.exists(s_dir):
                 continue
-                
-            # Pattern: *_adult_{hash}_*.csv
+            
             pattern = os.path.join(s_dir, f"*_adult_{c_hash}_*.csv")
             matches = glob.glob(pattern)
             
             for m_file in matches:
-                # Extract model name
-                # filename: model_adult_hash_...
-                # basename: model_adult_hash_...
                 basename = os.path.basename(m_file)
-                # Split by _adult_
+                # Parse model name
                 if '_adult_' in basename:
                     model_name = basename.split('_adult_')[0]
                 else:
                     model_name = "External"
-                    
-                print(f"Evaluating External Model: {model_name} from {basename}...")
                 
                 try:
                     ext_df = pd.read_csv(m_file)
-                    
-                    # Normalize columns (replace . with -)
-                    # TabDiff uses dots, dataset uses hyphens
+                    # Normalize columns if needed (dots to hyphens)
                     ext_df.columns = [c.replace('.', '-') for c in ext_df.columns]
-                    
-                    # Align Columns
-                    # Some external models might have different column order or extra cols
-                    common_cols = [c for c in real_subset.columns if c in ext_df.columns]
-                    if len(common_cols) < len(real_subset.columns):
-                        print(f"Warning: {model_name} missing columns. Skipping.")
-                        continue
-                        
-                    ext_df = ext_df[real_subset.columns]
-                    
-                    # Subsample Real (Reuse eval_real from earlier to be fair? Yes.)
-                    # But we need to make sure eval_real is consistent.
-                    # It was defined above as 'eval_real = real_subset.sample(...)'.
-                    # This is same for all models for this constraint.
-                    
-                    eval_ext = EvaluationFramework(eval_real, ext_df, task_type='classification', target_col='income')
-                    
-                    # Metrics
-                    fid = eval_ext.evaluate_fidelity()
-                    wds = [v for k, v in fid.items() if k.startswith('WD')]
-                    jsds = [v for k, v in fid.items() if k.startswith('JSD')]
-                    mean_wd = np.mean(wds) if wds else 0
-                    mean_jsd = np.mean(jsds) if jsds else 0
-                    
-                    u = eval_ext.evaluate_utility()
-                    p = eval_ext.evaluate_privacy(sample_size=min(len(eval_real), 1000))
-                    d = eval_ext.evaluate_discriminator_measure()
-                    
-                    results.append({
-                        'Method': model_name,
-                        'Hash': c_hash,
-                        'TSTR': u.get('TSTR_F1', 0),
-                        'TRTR': u.get('TRTR_F1', 0),
-                        'DCR_Mean': p.get('DCR_Mean', 0),
-                        'DCR_5th': p.get('DCR_5th_Percentile', 0),
-                        'Mean_WD': mean_wd,
-                        'Mean_JSD': mean_jsd,
-                        'Discrim_AUC': d.get('Discriminator_AUC', 0)
-                    })
-                    
+                    files_to_eval.append((model_name, ext_df))
                 except Exception as e:
-                    print(f"Error evaluating {model_name} for {c_hash}: {e}")
+                    print(f"Failed to read external file {basename}: {e}")
+
+        # --- Run Evaluation ---
+        for method, df in files_to_eval:
+            res = evaluate_generation(real_subset, df, method, c_hash)
+            if res:
+                results.append(res)
             
     # Save Results
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
     res_df = pd.DataFrame(results)
-    res_df.to_csv(os.path.join(OUTPUT_DIR, "benchmark_comparison.csv"), index=False)
-    print("Benchmark Complete!")
+    out_file = os.path.join(args.output_dir, "benchmark_comparison.csv")
+    res_df.to_csv(out_file, index=False)
+    print(f"Benchmark Complete! Results saved to {out_file}")
+    
     try:
-        print(res_df.groupby('Method').mean(numeric_only=True))
+        if not res_df.empty:
+            print("\n--- Summary ---")
+            print(res_df.groupby('Method').mean(numeric_only=True))
     except Exception as e:
         print(f"Could not print summary: {e}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    
+    # Paths (Parametrized)
+    parser.add_argument('--real_data_path', type=str, default="datasets/adult/train.csv")
+    parser.add_argument('--benchmark_dir', type=str, default="../Project/sd_framework/benchmark_results_20260202")
+    parser.add_argument('--constraints_file', type=str, default="adult_constraints.json")
+    parser.add_argument('--baseline_data_dir', type=str, default="data/adult/single")
+    parser.add_argument('--output_dir', type=str, default="benchmark_results")
+    
     # DS-Flow Args
     parser.add_argument('--ds_checkpoint', type=str, required=True)
     parser.add_argument('--ds_tokenizer', type=str, required=True)
     parser.add_argument('--ds_condition_encoder', type=str, default=None)
     parser.add_argument('--d_model', type=int, default=512)
-    # Model 1 Args
-    parser.add_argument('--m1_checkpoint', type=str, required=True)
-    parser.add_argument('--m1_preprocessor', type=str, required=True)
-    parser.add_argument('--m1_condition_encoder', type=str, required=True)
-    parser.add_argument('--m1_hidden_dim', type=int, default=512)
-    parser.add_argument('--m1_layers', type=int, default=6)
-    parser.add_argument('--m1_heads', type=int, default=8)
+    
+    # Baseline Model Args (Renamed from m1_)
+    parser.add_argument('--baseline_checkpoint', type=str, required=True)
+    parser.add_argument('--baseline_preprocessor', type=str, required=True)
+    parser.add_argument('--baseline_condition_encoder', type=str, required=True)
+    parser.add_argument('--baseline_hidden_dim', type=int, default=512)
+    parser.add_argument('--baseline_layers', type=int, default=6)
+    parser.add_argument('--baseline_heads', type=int, default=8)
+    
     # General
     parser.add_argument('--condition_col', type=str, default='income')
     parser.add_argument('--limit', type=int, default=None)
@@ -489,5 +415,3 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     run_benchmark(args)
-
-
