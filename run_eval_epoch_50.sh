@@ -3,7 +3,7 @@
 # Configuration
 CHECKPOINT_PATH="checkpoints_adult_large/checkpoint_epoch_50.pt"
 PREPROCESSOR_PATH="checkpoints_adult_large/preprocessor.json"
-CONDITION_ENCODER_PATH="checkpoints_adult_large/condition_encoder.joblib"
+CONDITION_ENCODER_PATH="checkpoints_adult_large/condition_encoder.json"
 TEST_DATA_PATH="datasets/adult/test.csv"
 OUTPUT_DIR="results_adult_large_epoch50"
 

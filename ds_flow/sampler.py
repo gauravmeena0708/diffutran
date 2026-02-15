@@ -4,6 +4,8 @@ import argparse
 import os
 import sys
 import joblib
+import json
+import numpy as np
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,12 +25,8 @@ def sample_ds_flow(args):
     # and might have issues if saved on GPU and loaded on CPU or vice versa.
     # We assume it was saved on CPU/GPU and we handle mapping.
     
-    # Actually, let's instantiate and load state for safety? 
-    # No, sklearn state is complex to load manually.
-    tokenizer = joblib.load(args.tokenizer_path)
-    # Ensure device
-    tokenizer.device = device
-    tokenizer.to(device)
+    # Use the safe load method
+    tokenizer = QuantileTokenizer.load(args.tokenizer_path, device=device)
     
     # 2. Config
     config = DSFlowConfig()
@@ -60,9 +58,20 @@ def sample_ds_flow(args):
     if condition_col:
         dir_name = os.path.dirname(args.checkpoint_path)
         encoder_path = os.path.join(dir_name, 'condition_encoder.joblib')
+        # Try both .json and .joblib for compatibility
+        if not os.path.exists(encoder_path):
+            encoder_path = os.path.join(dir_name, 'condition_encoder.json')
+
         if os.path.exists(encoder_path):
             print(f"Loading condition encoder from {encoder_path}")
-            le_condition = joblib.load(encoder_path)
+            if encoder_path.endswith('.json'):
+                from sklearn.preprocessing import LabelEncoder
+                le_condition = LabelEncoder()
+                with open(encoder_path, 'r') as f:
+                    classes = json.load(f)
+                le_condition.classes_ = np.array(classes)
+            else:
+                le_condition = joblib.load(encoder_path)
             num_classes = len(le_condition.classes_)
             
             # Generate y

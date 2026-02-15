@@ -411,8 +411,9 @@ def train_diffusion_model(
         
         # Save condition encoder
         os.makedirs(save_dir, exist_ok=True)
-        import joblib
-        joblib.dump(le, os.path.join(save_dir, 'condition_encoder.joblib'))
+        # Using JSON for safe serialization of LabelEncoder classes
+        with open(os.path.join(save_dir, 'condition_encoder.json'), 'w') as f:
+            json.dump(le.classes_.tolist(), f)
         
         # Drop condition col from training features
         # df = df.drop(columns=[condition_col])
