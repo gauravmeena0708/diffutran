@@ -411,16 +411,8 @@ def train_diffusion_model(
         
         # Save condition encoder
         os.makedirs(save_dir, exist_ok=True)
-        # Using JSON for safe serialization of LabelEncoder classes
-        with open(os.path.join(save_dir, 'condition_encoder.json'), 'w') as f:
-            json.dump(le.classes_.tolist(), f)
-        
-        # Drop condition col from training features
-        # df = df.drop(columns=[condition_col])
-        # Wait, usually we still want to generate the label? 
-        # Standard Class Cond Gen: P(X | Y), we generate X. Y is given.
-        # X usually includes all features EXCEPT Y.
-        pass
+        import joblib
+        joblib.dump(le, os.path.join(save_dir, 'condition_encoder.joblib'))
     
     # Preprocess data
     print("Preprocessing data...")
