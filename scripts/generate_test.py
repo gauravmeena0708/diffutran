@@ -15,6 +15,8 @@ from src.diffutron.model import DiffusionModel
 from src.diffutron.diffusion import GaussianDiffusion
 from src.common.data_utils import DataPreprocessor
 from src.common.evaluation_metrics import EvaluationFramework
+from scripts.experiment_utils import get_constraint_hash
+
 
 def load_model(checkpoint_path, preprocessor_path, condition_encoder_path=None, 
                hidden_dim=256, num_layers=6, num_heads=8, device='cuda'):
@@ -224,7 +226,32 @@ def main(args):
     
     # Save synthetic data
     os.makedirs(args.output_dir, exist_ok=True)
-    out_path = os.path.join(args.output_dir, 'synthetic_data.csv')
+    
+    # New naming convention based on sd_framework
+    from datetime import datetime
+
+    def get_dataset_name(path):
+        return os.path.basename(os.path.dirname(path))
+
+    model_name = "diffutron"
+    dataset_name = get_dataset_name(args.real_data_path)
+    
+    # Process constraints for hashing
+    constraints_for_hash = []
+    if args.constraint:
+        for c in args.constraint:
+            if '=' in c:
+                col, val = c.split('=', 1)
+                constraints_for_hash.append({"column": col.strip(), "value": val.strip()})
+
+    cons_hash = get_constraint_hash(constraints_for_hash) if constraints_for_hash else "baseline"
+    
+    month = datetime.now().strftime("%Y-%m")
+    num_samples = args.num_samples
+    
+    output_filename = f"{model_name}_{dataset_name}_{cons_hash}_{month}_{num_samples}.csv"
+    
+    out_path = os.path.join(args.output_dir, output_filename)
     synthetic_data.to_csv(out_path, index=False)
     print(f"Saved synthetic data to {out_path}")
     
@@ -330,6 +357,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=1000)
     parser.add_argument('--guidance_scale', type=float, default=1.0)
     parser.add_argument('--condition_col', type=str, default=None)
+    parser.add_argument('--constraint', type=str, action='append', help='Add a constraint in format column=value. Can be used multiple times.')
     parser.add_argument('--sample_condition_dist', action='store_true', help='Sample conditions from real data distribution')
     parser.add_argument('--hidden_dim', type=int, default=256)
     parser.add_argument('--num_layers', type=int, default=6)

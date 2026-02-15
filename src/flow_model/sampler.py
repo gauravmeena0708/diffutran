@@ -7,6 +7,10 @@ import joblib
 import json
 import numpy as np
 
+# Add project root to path to allow imports from scripts
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from scripts.experiment_utils import get_constraint_hash
 from .config import DSFlowConfig
 from .models.dual_stream import DualStreamTransformer
 from .models.flow_matching import OTCFM
@@ -96,7 +100,28 @@ def sample_ds_flow(args):
     # 7. Save
     os.makedirs(args.output_dir, exist_ok=True)
 
-    output_path = os.path.join(args.output_dir, args.output_name)
+    # New naming convention based on sd_framework
+    from datetime import datetime
+
+    model_name = "flow_model"
+    dataset_name = args.dataset_name
+    
+    # Process constraints for hashing
+    constraints_for_hash = []
+    if args.constraint:
+        for c in args.constraint:
+            if '=' in c:
+                col, val = c.split('=', 1)
+                constraints_for_hash.append({"column": col.strip(), "value": val.strip()})
+
+    cons_hash = get_constraint_hash(constraints_for_hash) if constraints_for_hash else "baseline"
+    
+    month = datetime.now().strftime("%Y-%m")
+    num_samples = args.num_samples
+    
+    output_filename = f"{model_name}_{dataset_name}_{cons_hash}_{month}_{num_samples}.csv"
+
+    output_path = os.path.join(args.output_dir, output_filename)
     df_syn.to_csv(output_path, index=False)
     print(f"Saved to {output_path}")
 
@@ -104,11 +129,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint_path', type=str, required=True)
     parser.add_argument('--tokenizer_path', type=str, required=True)
+    parser.add_argument('--dataset_name', type=str, required=True, help="Name of the dataset, used for naming the output file.")
     parser.add_argument('--output_dir', type=str, default='results_dsflow')
-    parser.add_argument('--output_name', type=str, default='synthetic_data.csv')
     parser.add_argument('--num_samples', type=int, default=1000)
     parser.add_argument('--steps', type=int, default=20)
     parser.add_argument('--d_model', type=int, default=512)
+    parser.add_argument('--condition_col', type=str, default=None)
+    parser.add_argument('--constraint', type=str, action='append', help='Add a constraint in format column=value. Can be used multiple times.')
     
     args = parser.parse_args()
     sample_ds_flow(args)

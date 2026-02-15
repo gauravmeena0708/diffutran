@@ -180,3 +180,33 @@ class TestSinusoidalPositionalEmbedding:
             timesteps = torch.randint(0, 1000, (10,))
             out = embedder(timesteps)
             assert out.shape == (10, dim)
+
+    @pytest.mark.skipif(is_torch_mocked(), reason="Requires actual torch ops")
+    def test_embedding_values(self):
+        """Test the actual values of the sinusoidal embedding."""
+        import torch
+        import math
+
+        dim = 16
+        embedder = SinusoidalPositionalEmbedding(dim)
+        
+        timesteps = torch.tensor([0, 10, 100])
+        
+        # Manual calculation for t=10
+        t = 10
+        half_dim = dim // 2
+        freqs = torch.exp(
+            -math.log(10000.0) * torch.arange(half_dim) / (half_dim - 1)
+        )
+        args = t * freqs
+        expected_embedding_t10 = torch.cat([torch.sin(args), torch.cos(args)])
+        
+        output_embeddings = embedder(timesteps)
+        
+        assert output_embeddings.shape == (3, dim)
+        assert torch.allclose(output_embeddings[1], expected_embedding_t10, atol=1e-6)
+        
+        # Check for t=0, which should be sin(0)=0 and cos(0)=1
+        assert torch.allclose(output_embeddings[0, :half_dim], torch.zeros(half_dim), atol=1e-6)
+        assert torch.allclose(output_embeddings[0, half_dim:], torch.ones(half_dim), atol=1e-6)
+

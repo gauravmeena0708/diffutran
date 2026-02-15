@@ -87,14 +87,19 @@ def generate_ds_flow_samples(engine, tokenizer, le_condition, n_samples, constra
                  print(f"Warning: Value {target_val} not in condition encoder classes.")
 
     # Generation Loop
-    max_iter = 10
+    max_iter = 100 # Increased iterations since we process in smaller batches
+    batch_size_limit = 4096
+    
+    print(f"DEBUG: Generating {n_samples} samples. Constraints: {constraints}")
     
     for i in range(max_iter):
         needed = n_samples - len(generated_df)
         if needed <= 0:
             break
             
-        current_batch = max(needed * 2, 100)
+        # Cap batch size to avoid OOM
+        current_batch = min(max(needed * 2, 100), batch_size_limit)
+        print(f"DEBUG: Batch {i+1}/{max_iter}, generating {current_batch} candidates...")
         
         # Prepare condition y
         y = None
@@ -145,13 +150,16 @@ def generate_baseline_samples(model, preprocessor, diffusion, condition_encoder,
         if str(target_val) in condition_encoder.classes_:
             target_class = condition_encoder.transform([str(target_val)])[0]
             
-    max_iter = 10
+    max_iter = 100
+    batch_size_limit = 4096
+    
     for i in range(max_iter):
         needed = n_samples - len(generated_df)
         if needed <= 0:
             break
             
-        current_batch = max(needed * 2, 100)
+        current_batch = min(max(needed * 2, 100), batch_size_limit)
+        print(f"DEBUG: Baseline Batch {i+1}/{max_iter}, generating {current_batch} candidates...")
         
         batch_df, _ = generate_baseline_data(
             model, diffusion, preprocessor, current_batch, 

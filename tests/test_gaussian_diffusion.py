@@ -117,3 +117,51 @@ def test_gaussian_diffusion_valid_schedule_types():
         GaussianDiffusion(schedule_type="cosine")
     except Exception as e:
         pytest.fail(f"Valid schedule types raised exception: {e}")
+
+@pytest.fixture
+def mock_model():
+    """Creates a mock model that returns a tensor of the same shape as input."""
+    model = MagicMock()
+    model.side_effect = lambda x, t, **kwargs: torch.zeros_like(x)
+    return model
+
+def test_p_sample_shape(mock_model):
+    """Test the output shape of the p_sample method."""
+    diffusion = GaussianDiffusion(num_timesteps=10)
+    x = torch.randn(2, 4)
+    t = torch.tensor([5, 5])
+    
+    x_denoised = diffusion.p_sample(mock_model, x, t)
+    
+    assert x_denoised.shape == x.shape
+
+def test_p_sample_t0(mock_model):
+    """Test p_sample at t=0, which should be deterministic without noise."""
+    diffusion = GaussianDiffusion(num_timesteps=10)
+    x = torch.randn(2, 4)
+    t = torch.tensor([0, 0])
+    
+    # At t=0, the model should ideally return the denoised image, and p_sample adds no noise
+    x_denoised = diffusion.p_sample(mock_model, x, t)
+    
+    # With a mock model that predicts zero noise, the result should be related to x
+    # in a predictable way. Let's verify it's not random.
+    x_denoised_2 = diffusion.p_sample(mock_model, x, t)
+    assert torch.allclose(x_denoised, x_denoised_2)
+
+def test_sample_shape(mock_model):
+    """Test the output shape of the full sample method."""
+    diffusion = GaussianDiffusion(num_timesteps=10)
+    shape = (3, 6)
+    
+    # Mock torch.full to work with MagicMock model
+    original_full = torch.full
+    torch.full = lambda *args, **kwargs: original_full(*args, **kwargs)
+    
+    generated_samples = diffusion.sample(mock_model, shape, device='cpu')
+    
+    assert generated_samples.shape == shape
+    
+    # Restore original torch.full
+    torch.full = original_full
+
