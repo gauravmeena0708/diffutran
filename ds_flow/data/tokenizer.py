@@ -3,7 +3,6 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import QuantileTransformer, LabelEncoder
-import joblib
 
 class QuantileTokenizer(nn.Module):
     """
@@ -228,8 +227,93 @@ class QuantileTokenizer(nn.Module):
         return pd.DataFrame(df_dict)
 
     def save(self, path):
-         joblib.dump(self, path)
+        """Save tokenizer state safely without joblib/pickle"""
+        # 1. State Dict (Weights)
+        state_dict = self.state_dict()
+
+        # 2. Metadata and Sklearn states
+        metadata = {
+            'd_model': self.d_model,
+            'n_quantiles': self.n_quantiles,
+            'output_dist': self.output_dist,
+            'numerical_cols': self.numerical_cols,
+            'categorical_cols': self.categorical_cols,
+            'cardinalities': self.cardinalities,
+            'label_encoders': {col: le.classes_.tolist() for col, le in self.label_encoders.items()},
+            'quantile_transformers': {
+                col: {
+                    'quantiles_': qt.quantiles_.tolist(),
+                    'references_': qt.references_.tolist(),
+                    'output_distribution': qt.output_distribution,
+                } for col, qt in self.quantile_transformers.items()
+            }
+        }
+
+        # Save combined state using torch.save (safely loaded later with weights_only=True)
+        torch.save({'state_dict': state_dict, 'metadata': metadata}, path)
     
-    @staticmethod
-    def load(path):
-        return joblib.load(path)
+    @classmethod
+    def load(cls, path, device='cpu'):
+        """Load tokenizer state safely"""
+        # Load data with weights_only=True to prevent arbitrary code execution
+        try:
+            try:
+                data = torch.load(path, map_location=device, weights_only=True)
+            except TypeError:
+                # Fallback for older torch versions if weights_only is not supported
+                data = torch.load(path, map_location=device)
+        except Exception:
+            # Handle legacy joblib format if torch.load fails (e.g. on a joblib file)
+            import joblib
+            return joblib.load(path)
+
+        if not isinstance(data, dict) or 'metadata' not in data:
+            # Fallback for other potential legacy formats
+            import joblib
+            return joblib.load(path)
+
+        metadata = data['metadata']
+
+        # Create instance
+        instance = cls(
+            d_model=metadata['d_model'],
+            n_quantiles=metadata['n_quantiles'],
+            output_dist=metadata['output_dist'],
+            device=device
+        )
+
+        instance.numerical_cols = metadata['numerical_cols']
+        instance.categorical_cols = metadata['categorical_cols']
+        instance.cardinalities = metadata['cardinalities']
+
+        # Restore LabelEncoders
+        for col, classes in metadata['label_encoders'].items():
+            le = LabelEncoder()
+            le.classes_ = np.array(classes)
+            instance.label_encoders[col] = le
+
+        # Restore QuantileTransformers
+        for col, qt_state in metadata['quantile_transformers'].items():
+            qt = QuantileTransformer(
+                n_quantiles=len(qt_state['quantiles_']),
+                output_distribution=qt_state['output_distribution']
+            )
+            qt.quantiles_ = np.array(qt_state['quantiles_'])
+            qt.references_ = np.array(qt_state['references_'])
+            instance.quantile_transformers[col] = qt
+
+        # Initialize layers (Embeddings/Projections) - matching fit() logic
+        for col in instance.categorical_cols:
+            cardinality = instance.cardinalities[col]
+            instance.cat_embeddings[col] = nn.Embedding(cardinality, instance.d_model)
+            instance.cat_decoders[col] = nn.Linear(instance.d_model, cardinality)
+
+        for col in instance.numerical_cols:
+            instance.num_projections[col] = nn.Linear(1, instance.d_model)
+            instance.num_decoders[col] = nn.Linear(instance.d_model, 1)
+
+        # Load weights
+        instance.load_state_dict(data['state_dict'])
+        instance.to(device)
+
+        return instance

@@ -224,3 +224,77 @@ class EvaluationFramework:
             'DCR_Mean': dcr_mean,
             'DCR_5th_Percentile': dcr_5th
         }
+
+    # =================
+    # 5. RELATIONSHIP REPORT
+    # =================
+    def generate_relationship_report(self, data_type='synthetic'):
+        """
+        Generate a natural language description of relationships in the data.
+        Args:
+            data_type: 'synthetic' or 'real'
+        """
+        if data_type == 'synthetic':
+            df = self.synthetic_data
+        else:
+            df = self.real_data
+
+        report = [f"Relationship Analysis Report ({data_type.capitalize()} Data):"]
+        report.append("-" * 40)
+
+        # 1. Numerical Correlations
+        numerical_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        if len(numerical_cols) > 1:
+            corr_matrix = df[numerical_cols].corr()
+            # Iterate over upper triangle
+            for i in range(len(numerical_cols)):
+                for j in range(i+1, len(numerical_cols)):
+                    col1 = numerical_cols[i]
+                    col2 = numerical_cols[j]
+                    corr = corr_matrix.iloc[i, j]
+
+                    if abs(corr) > 0.7:
+                        strength = "strongly" if abs(corr) > 0.85 else "moderately"
+                        direction = "increases" if corr > 0 else "decreases"
+                        report.append(f"- {col1} and {col2} are {strength} {'positively' if corr > 0 else 'negatively'} correlated ({corr:.2f}). As {col1} increases, {col2} tends to {direction}.")
+
+        # 2. Categorical-Categorical Associations
+        categorical_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
+
+        for i in range(len(categorical_cols)):
+            for j in range(len(categorical_cols)):
+                if i == j: continue
+                col1 = categorical_cols[i]
+                col2 = categorical_cols[j]
+
+                # Contingency Table
+                try:
+                    contingency = pd.crosstab(df[col1], df[col2], normalize='index')
+
+                    # Check for strong conditional probabilities
+                    for val1 in contingency.index:
+                        for val2 in contingency.columns:
+                            prob = contingency.loc[val1, val2]
+                            if prob > 0.8:
+                                report.append(f"- When {col1} is '{val1}', {col2} is likely '{val2}' (probability: {prob:.2f}).")
+                except Exception as e:
+                    pass # Skip if error in crosstab
+
+        # 3. Categorical-Numerical Differences
+        for cat_col in categorical_cols:
+            for num_col in numerical_cols:
+                try:
+                    groups = df.groupby(cat_col)[num_col]
+                    means = groups.mean()
+
+                    if len(means) > 0 and means.std() > 0 and (means.max() - means.min() > means.std() * 2):
+                         highest_cat = means.idxmax()
+                         lowest_cat = means.idxmin()
+                         report.append(f"- {num_col} varies by {cat_col}. It is highest when {cat_col} is '{highest_cat}' ({means[highest_cat]:.2f}) and lowest when {cat_col} is '{lowest_cat}' ({means[lowest_cat]:.2f}).")
+                except Exception as e:
+                    pass
+
+        if len(report) == 2:
+            report.append("No strong relationships found.")
+
+        return "\n".join(report)

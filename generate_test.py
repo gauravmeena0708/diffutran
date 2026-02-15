@@ -23,13 +23,24 @@ def load_model(checkpoint_path, preprocessor_path, condition_encoder_path=None,
     condition_encoder = None
     num_classes = None
     if condition_encoder_path and os.path.exists(condition_encoder_path):
-        import joblib
-        condition_encoder = joblib.load(condition_encoder_path)
+        from sklearn.preprocessing import LabelEncoder
+        condition_encoder = LabelEncoder()
+
+        # Safe loading from JSON
+        if condition_encoder_path.endswith('.json'):
+            with open(condition_encoder_path, 'r') as f:
+                classes = json.load(f)
+            condition_encoder.classes_ = np.array(classes)
+        else:
+            # Fallback for old format if necessary, though new format is preferred
+            import joblib
+            condition_encoder = joblib.load(condition_encoder_path)
+
         num_classes = len(condition_encoder.classes_)
     
     # Checkpoint
     print(f"Loading checkpoint from {checkpoint_path}...")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     
     # Model Config
     num_numerical_features = len(preprocessor.numerical_cols)
@@ -216,7 +227,14 @@ def main(args):
     # Evaluation
     print("Running evaluation...")
     target_col = args.condition_col if args.condition_col else None
-    
+
+    # Load real data
+    try:
+        real_data = pd.read_csv(args.real_data_path)
+    except Exception as e:
+        print(f"Error loading real data from {args.real_data_path}: {e}")
+        return
+
     # Filter data for evaluation if requested
     eval_real_data = real_data
     eval_synthetic_data = synthetic_data
@@ -289,6 +307,13 @@ def main(args):
     # Plots
     if len(eval_synthetic_data) > 0:
         evaluator.plot_correlation_difference(os.path.join(args.output_dir, 'correlation_diff.png'))
+
+    # Relationship Report
+    print("Generating Relationship Report...")
+    report = evaluator.generate_relationship_report(data_type='synthetic')
+    with open(os.path.join(args.output_dir, 'relationship_report.txt'), 'w') as f:
+        f.write(report)
+    print(f"Saved relationship report to {os.path.join(args.output_dir, 'relationship_report.txt')}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

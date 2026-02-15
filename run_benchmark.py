@@ -30,15 +30,20 @@ def load_ds_flow_model(checkpoint_path, tokenizer_path, condition_encoder_path=N
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Load Tokenizer
-    tokenizer = joblib.load(tokenizer_path)
-    tokenizer.device = device
-    tokenizer.to(device)
+    tokenizer = QuantileTokenizer.load(tokenizer_path, device=device)
     
     # Load Condition Encoder
     le_condition = None
     num_classes = None
     if condition_encoder_path and os.path.exists(condition_encoder_path):
-        le_condition = joblib.load(condition_encoder_path)
+        from sklearn.preprocessing import LabelEncoder
+        le_condition = LabelEncoder()
+        if condition_encoder_path.endswith('.json'):
+            with open(condition_encoder_path, 'r') as f:
+                classes = json.load(f)
+            le_condition.classes_ = np.array(classes)
+        else:
+            le_condition = joblib.load(condition_encoder_path)
         num_classes = len(le_condition.classes_)
     
     # Config
@@ -58,7 +63,7 @@ def load_ds_flow_model(checkpoint_path, tokenizer_path, condition_encoder_path=N
     engine = OTCFM(backbone, tokenizer, config).to(device)
     
     # Weights
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     engine.load_state_dict(checkpoint)
     engine.eval()
     

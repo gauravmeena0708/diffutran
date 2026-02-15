@@ -25,7 +25,7 @@ echo "Training complete. Starting Generation and Evaluation..."
 python3 generate_test.py \
   --checkpoint_path "$CHECKPOINT_DIR/checkpoint_epoch_final.pt" \
   --preprocessor_path "$CHECKPOINT_DIR/preprocessor.json" \
-  --condition_encoder_path "$CHECKPOINT_DIR/condition_encoder.joblib" \
+  --condition_encoder_path "$CHECKPOINT_DIR/condition_encoder.json" \
   --real_data_path $TEST_DATA_PATH \
   --output_dir $OUTPUT_DIR \
   --num_samples 2000 \

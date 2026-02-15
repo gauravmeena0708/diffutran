@@ -6,7 +6,6 @@ import argparse
 import pandas as pd
 from tqdm import tqdm
 import json
-import joblib
 from sklearn.preprocessing import LabelEncoder
 
 # Add project root to path
@@ -48,7 +47,8 @@ def train_ds_flow(args):
         num_classes = len(le_condition.classes_)
         
         # Save condition encoder
-        joblib.dump(le_condition, os.path.join(args.save_dir, 'condition_encoder.joblib'))
+        with open(os.path.join(args.save_dir, 'condition_encoder.json'), 'w') as f:
+            json.dump(le_condition.classes_.tolist(), f)
         
     # Initialize Tokenizer (Fit on data WITHOUT condition col? Or with?)
     # If we want to condition, we should NOT tokenize the condition column as a feature.
@@ -86,7 +86,7 @@ def train_ds_flow(args):
     
     # Save Tokenizer
     os.makedirs(args.save_dir, exist_ok=True)
-    tokenizer_path = os.path.join(args.save_dir, 'tokenizer.joblib')
+    tokenizer_path = os.path.join(args.save_dir, 'tokenizer.pt')
     tokenizer.save(tokenizer_path)
     
     # Create DataLoader
