@@ -162,6 +162,7 @@ def generate_model_1_samples(model, preprocessor, diffusion, condition_encoder, 
             model, diffusion, preprocessor, current_batch, 
             guidance_scale=1.0, 
             condition_col=condition_col, 
+            condition_encoder=condition_encoder,
             sample_condition_dist=(target_class is None),
             device=device,
             condition_specific_val=target_class
@@ -190,11 +191,7 @@ def generate_model_1_samples(model, preprocessor, diffusion, condition_encoder, 
     if generated_y_labels:
         final_y = torch.cat(generated_y_labels)[:len(final_df)]
         
-    # Add condition column back
-    if condition_col and final_y is not None:
-         # Need condition_encoder here? Yes, passed as arg.
-         labels = condition_encoder.inverse_transform(final_y.cpu().numpy())
-         final_df[condition_col] = labels
+    # Condition column is already added by generate_model_1 (generate_synthetic_data)
         
     return final_df, final_y
 
