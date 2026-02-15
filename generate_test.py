@@ -108,7 +108,7 @@ def generate_data(
     
     return synthetic_df
 
-def generate_synthetic_data(model, diffusion, preprocessor, num_samples, guidance_scale=1.0, condition_col=None, sample_condition_dist=False, device='cuda', condition_specific_val=None):
+def generate_synthetic_data(model, diffusion, preprocessor, num_samples, guidance_scale=1.0, condition_col=None, condition_encoder=None, sample_condition_dist=False, device='cuda', condition_specific_val=None):
     model.eval()
     
     # 1. Generate Conditions (y)
@@ -142,23 +142,9 @@ def generate_synthetic_data(model, diffusion, preprocessor, num_samples, guidanc
     df_syn = preprocessor.inverse_transform(x.cpu().numpy())
     
     # 5. Add Condition Column
-    if condition_col and y is not None:
-        # Assuming we have access to label encoder or mapper?
-        # preprocessor usually handles features.
-        # If condition_col was excluded from features, we need the condition_encoder passed to main/load_model.
-        # But generate_synthetic_data doesn't have it.
-        # Main has it. We need to pass it or return y.
-        # Actually run_benchmark passes condition_encoder to generate_model_1_samples which calls generate_model_1.
-        # But generate_model_1 is generate_synthetic_data.
-        # generate_synthetic_data doesn't take condition_encoder.
-        # Let's fix this mess.
-        # Return df_syn and let caller handle it?
-        # NO, generate_synthetic_data is expected to return DataFrame.
-        # We can return y too?
-        # Or just return raw DF and let caller add y if they know it.
-        # run_benchmark knows y (target_class) or generates it.
-        # But generate_synthetic_data generates y internally if random.
-        pass
+    if condition_col and y is not None and condition_encoder is not None:
+        y_np = y.cpu().numpy()
+        df_syn[condition_col] = condition_encoder.inverse_transform(y_np)
         
     return df_syn, y
 
@@ -178,6 +164,10 @@ def main(args):
     
     diffusion = GaussianDiffusion(num_timesteps=1000) # Default
     
+    # Load real data for evaluation
+    print(f"Loading real data from {args.real_data_path}...")
+    real_data = pd.read_csv(args.real_data_path)
+
     synthetics = []
     
     # Generate in batches
@@ -206,13 +196,10 @@ def main(args):
             num_samples=current_batch_size, 
             guidance_scale=args.guidance_scale,
             condition_col=args.condition_col,
+            condition_encoder=condition_encoder,
             sample_condition_dist=args.sample_condition_dist,
             device=device
         )
-        
-        # Add conditions back to dataframe if using conditioned generation
-        if batch_y is not None and args.condition_col:
-            syn_batch_df[args.condition_col] = condition_encoder.inverse_transform(batch_y.cpu().numpy())
             
         synthetics.append(syn_batch_df)
         num_generated += current_batch_size
