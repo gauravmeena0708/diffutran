@@ -91,6 +91,13 @@ Do not use weak metrics. Implement the "Gold Standard":
 3. **Privacy:**
 * **DCR:** Euclidean Distance to Closest Record (on normalized data).
 
+4. **Natural Language Relationship Description:**
+* **Core Idea:** Automatically describe relationships between columns in natural language.
+* **Method:**
+    *   **Numerical Correlations:** Compute correlation matrix. Describe strong positive/negative correlations (> 0.7).
+    *   **Categorical-Categorical:** Use contingency tables to identify strong conditional probabilities (P(B|A) > 0.8).
+    *   **Categorical-Numerical:** Analyze group statistics (mean/std) to identify significant differences across categories.
+*   **Output:** A readable text report summarizing these findings.
 
 
 ## 3. Comparison Pipeline (`run_benchmark.py`)
