@@ -49,7 +49,7 @@ def sample_ds_flow(args):
     
     # 4. Load Weights
     print(f"Loading checkpoint from {args.checkpoint_path}...")
-    checkpoint = torch.load(args.checkpoint_path, map_location=device)
+    checkpoint = torch.load(args.checkpoint_path, map_location=device, weights_only=True)
     engine.load_state_dict(checkpoint)
     
     # Condition Handling
