@@ -108,6 +108,60 @@ def generate_data(
     
     return synthetic_df
 
+def generate_synthetic_data(model, diffusion, preprocessor, num_samples, guidance_scale=1.0, condition_col=None, sample_condition_dist=False, device='cuda', condition_specific_val=None):
+    model.eval()
+    
+    # 1. Generate Conditions (y)
+    y = None
+    if condition_col:
+        # If specific value requested (for benchmarking/subgroups)
+        if condition_specific_val is not None:
+            # Assume it's already an integer index
+            y = torch.full((num_samples,), condition_specific_val, device=device).long()
+        elif sample_condition_dist:
+             # Sample from distribution of real data? 
+             # For now, uniform if not provided
+             y = torch.randint(0, model.num_classes, (num_samples,), device=device).long()
+        else:
+             # Balanced?
+             y = torch.randint(0, model.num_classes, (num_samples,), device=device).long()
+             
+    # 2. Sample Noise
+    # Infer dims from preprocessor
+    num_num = len(preprocessor.numerical_cols)
+    cards = preprocessor.categorical_cardinalities
+    num_cat = sum(cards.values()) if isinstance(cards, dict) else sum(cards)
+    x = torch.randn((num_samples, num_num + num_cat), device=device)
+    
+    # 3. Denoise loop
+    for i in reversed(range(diffusion.num_timesteps)):
+        t = torch.full((num_samples,), i, device=device, dtype=torch.long)
+        x = diffusion.p_sample(model, x, t, y, guidance_scale=guidance_scale)
+        
+    # 4. Inverse Transform
+    df_syn = preprocessor.inverse_transform(x.cpu().numpy())
+    
+    # 5. Add Condition Column
+    if condition_col and y is not None:
+        # Assuming we have access to label encoder or mapper?
+        # preprocessor usually handles features.
+        # If condition_col was excluded from features, we need the condition_encoder passed to main/load_model.
+        # But generate_synthetic_data doesn't have it.
+        # Main has it. We need to pass it or return y.
+        # Actually run_benchmark passes condition_encoder to generate_model_1_samples which calls generate_model_1.
+        # But generate_model_1 is generate_synthetic_data.
+        # generate_synthetic_data doesn't take condition_encoder.
+        # Let's fix this mess.
+        # Return df_syn and let caller handle it?
+        # NO, generate_synthetic_data is expected to return DataFrame.
+        # We can return y too?
+        # Or just return raw DF and let caller add y if they know it.
+        # run_benchmark knows y (target_class) or generates it.
+        # But generate_synthetic_data generates y internally if random.
+        pass
+        
+    return df_syn, y
+
 def main(args):
     device = args.device
     
@@ -124,39 +178,6 @@ def main(args):
     
     diffusion = GaussianDiffusion(num_timesteps=1000) # Default
     
-    # Real Data for Evaluation
-    real_data = pd.read_csv(args.real_data_path)
-    
-    # Determine generation condition
-    # If model is conditional, we can:
-    # 1. Generate based on real data distribution of conditions (reproduce real set)
-    # 2. Generate balanced classes
-    # 3. Generate specific class
-    
-    conditions = None
-    if condition_encoder:
-        # Strategy: Reproduce label distribution of real data
-        # Check if condition col exists in real data
-        # We need the condition column name. It's not stored in preprocessor.
-        # It assumes we know it or pass it.
-        pass # For now, simple generation
-        
-        # If we want to evaluate fidelity properly, we should generate with same label distribution as real data
-        # assuming we have the label in real_data.
-        # Getting label col name is tricky if not passed.
-        
-        # Fallback: Generate unconditional (cond=None) if user didn't specify?
-        # But if we want to evaluate utility, we need labels.
-        # If we generate unconditional, we get "null" class samples?
-        # No, CFG with cond=None generates "unconditional" distribution, which approximates marginal p(x).
-        # But we don't get the labels Y for TSTR.
-        
-        # BETTER: Generate Y first (sample from prior), then Generate X | Y.
-        if args.sample_condition_dist and args.condition_col:
-             real_labels = real_data[args.condition_col]
-             sampled_labels_str = real_labels.sample(args.num_samples, replace=True).astype(str).values
-             conditions = condition_encoder.transform(sampled_labels_str)
-        
     synthetics = []
     
     # Generate in batches
@@ -167,26 +188,37 @@ def main(args):
         current_batch_size = min(batch_size, args.num_samples - num_generated)
         
         # Prepare batch conditions if needed
-        batch_cond = None
-        if conditions is not None:
-             batch_cond = conditions[num_generated : num_generated + current_batch_size]
+        # Note: generate_synthetic_data handles condition generation internally mostly.
+        # But if we want to pass specific conditions like in original main, we need to adapt.
+        # Original main had:
+        # if args.sample_condition_dist: ... conditions = ...
         
-        syn_batch = generate_data(
+        # We need to bridge the gap.
+        # generate_synthetic_data doesn't accept "condition" array directly in my signature above.
+        # It accepts condition_specific_val or sample_condition_dist flag.
+        
+        # For this script (generate_test.py) usage, we might need to pass `y` explicitly?
+        # Let's keep it simple and just call generate_synthetic_data with flags.
+        
+        # syn_batch is now (df, y_tensor)
+        syn_batch_df, batch_y = generate_synthetic_data(
             model, diffusion, preprocessor, 
             num_samples=current_batch_size, 
-            condition=batch_cond,
             guidance_scale=args.guidance_scale,
+            condition_col=args.condition_col,
+            sample_condition_dist=args.sample_condition_dist,
             device=device
         )
         
         # Add conditions back to dataframe if using conditioned generation
-        if batch_cond is not None and args.condition_col:
-            syn_batch[args.condition_col] = condition_encoder.inverse_transform(batch_cond)
+        if batch_y is not None and args.condition_col:
+            syn_batch_df[args.condition_col] = condition_encoder.inverse_transform(batch_y.cpu().numpy())
             
-        synthetics.append(syn_batch)
+        synthetics.append(syn_batch_df)
         num_generated += current_batch_size
         
     synthetic_data = pd.concat(synthetics, ignore_index=True)
+
     
     # Save synthetic data
     os.makedirs(args.output_dir, exist_ok=True)

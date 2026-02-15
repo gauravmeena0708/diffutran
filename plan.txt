@@ -1,0 +1,74 @@
+Step-by-Step Implementation Plan for DS-Flow
+Phase 1: The "Quantile Tokenizer" (Foundation)
+
+Same as before, but critical for SOTA performance.
+
+    Action: Create components/tokenizer.py.
+
+    Logic:
+
+        Numerical: QuantileTransform → Linear(1, d_model).
+
+        Categorical: Embedding(cardinality, d_model).
+
+        Output: A sequence X_tokens of shape [Batch, Num_Cols, d_model].
+
+Phase 2: The "Dual-Stream" Backbone (The Novelty)
+
+    Action: Modify models/transformer.py to create DualStreamTransformer.
+
+    Architecture:
+
+        Input: X_tokens (Local) and a learnable X_global token (Global).
+
+        Block Structure (Repeated L times):
+
+            Global Update: X_global attends to X_tokens (Cross-Attention) → "What details define this row?"
+
+            Local Update: X_tokens attend to X_global (Cross-Attention) → "Align details with the global theme."
+
+            Self Update: X_tokens attend to X_tokens (Self-Attention) → "Align columns with each other."
+
+        Output: The final X_tokens are used for prediction.
+
+Phase 3: Flow Matching Trainer (The Engine)
+
+    Action: Create models/flow_matching.py (Replaces gaussian_diffusion.py).
+
+    Math:
+
+        Source: x0​∼N(0,I) (Noise).
+
+        Target: x1​ (Real Data Tokens).
+
+        Time: t∈[0,1].
+
+        Interpolation: xt​=t⋅x1​+(1−t)⋅x0​.
+
+        Loss: ∣∣vθ​(xt​,t)−(x1​−x0​)∣∣2. (Predict the velocity vector).
+
+    Why it's better: The model learns to draw a straight line from noise to data. It doesn't need 1000 steps; it can do it in 10-20 steps (ODE Solver).
+
+Phase 4: Harpoon Inference (The Control)
+
+    Action: Implement sampler.py using an ODE Solver (e.g., Euler or RK4).
+
+    Innovation: Inject Harpoon Guidance into the ODE steps.
+
+        Standard ODE: xt+dt​=xt​+vθ​(xt​)⋅dt
+
+        Guided ODE: xt+dt​=xt​+(vθ​(xt​)−γ∇Lossconstraint​)⋅dt
+
+    Result: You can generate data that perfectly adheres to user rules like "Age < 18" without retraining.
+
+Immediate Next Step (Code Generation)
+
+I will generate the core Dual-Stream Transformer and Flow Matching logic, as these are the most complex "Novel" parts.
+
+Would you like me to generate the code for:
+
+    The DualStreamTransformer architecture?
+
+    The FlowMatching trainer (replacing Diffusion)?
+
+    The QuantileTokenizer?
