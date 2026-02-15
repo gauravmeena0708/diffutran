@@ -1,7 +1,13 @@
 import unittest
 import torch
 import torch.nn as nn
-from models.transformer import TransformerModule
+import sys
+import os
+
+# Add project root to path to allow imports from src
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from src.diffutron.transformer import TransformerModule
 
 class TestTransformerModule(unittest.TestCase):
     def setUp(self):

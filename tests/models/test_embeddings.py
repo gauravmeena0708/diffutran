@@ -1,10 +1,11 @@
 import pytest
 import sys
+import os
 from unittest.mock import MagicMock
 
-# Import the code under test
-# This relies on conftest.py mocking torch if it's missing
-from models.embeddings import FeatureEmbedder, SinusoidalPositionalEmbedding
+# Add project root to path to allow imports from src
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from src.diffutron.embeddings import FeatureEmbedder, SinusoidalPositionalEmbedding
 
 
 # Helper to check if torch is mocked

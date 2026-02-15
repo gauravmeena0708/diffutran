@@ -1,9 +1,17 @@
 import pytest
 import math
+import sys
+import os
+import torch
+from unittest.mock import MagicMock
+
+# Add project root to path to allow imports from src
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from src.diffutron.diffusion import GaussianDiffusion
+
 
 def test_q_sample_shape():
-    import torch
-    from models.gaussian_diffusion import GaussianDiffusion
     num_timesteps = 100
     diffusion = GaussianDiffusion(num_timesteps=num_timesteps)
 
@@ -17,8 +25,6 @@ def test_q_sample_shape():
     assert x_noisy.shape == x_start.shape
 
 def test_q_sample_deterministic():
-    import torch
-    from models.gaussian_diffusion import GaussianDiffusion
     num_timesteps = 10
     diffusion = GaussianDiffusion(num_timesteps=num_timesteps, schedule_type='linear', beta_start=0.1, beta_end=0.2)
 
@@ -45,8 +51,6 @@ def test_q_sample_deterministic():
     assert torch.allclose(x_noisy, expected)
 
 def test_q_sample_t0():
-    import torch
-    from models.gaussian_diffusion import GaussianDiffusion
     # At t=0, x_noisy should be very close to x_start if beta_start is small
     num_timesteps = 1000
     diffusion = GaussianDiffusion(num_timesteps=num_timesteps, beta_start=1e-8)
@@ -61,8 +65,6 @@ def test_q_sample_t0():
     assert torch.allclose(x_noisy, x_start, atol=1e-3)
 
 def test_q_sample_t_max():
-    import torch
-    from models.gaussian_diffusion import GaussianDiffusion
     # At t=max, x_noisy should be mostly noise if alphas_cumprod is close to 0
     num_timesteps = 100
     diffusion = GaussianDiffusion(num_timesteps=num_timesteps, beta_start=0.1, beta_end=0.9)
@@ -83,8 +85,6 @@ def test_q_sample_t_max():
     assert torch.abs(x_noisy.std() - 1.0) < 0.1
 
 def test_q_sample_no_noise():
-    import torch
-    from models.gaussian_diffusion import GaussianDiffusion
     num_timesteps = 100
     diffusion = GaussianDiffusion(num_timesteps=num_timesteps)
     x_start = torch.randn(4, 8)
@@ -94,8 +94,6 @@ def test_q_sample_no_noise():
     assert x_noisy.shape == x_start.shape
 
 def test_q_sample_consistency():
-    import torch
-    from models.gaussian_diffusion import GaussianDiffusion
     num_timesteps = 100
     diffusion = GaussianDiffusion(num_timesteps=num_timesteps)
     x_start = torch.randn(4, 8)
@@ -106,74 +104,6 @@ def test_q_sample_consistency():
     x_noisy2 = diffusion.q_sample(x_start, t, noise=noise)
 
     assert torch.equal(x_noisy1, x_noisy2)
-import sys
-import os
-from unittest.mock import MagicMock
-
-# Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# Helper to mock dependencies if missing
-try:
-    import torch
-except ImportError:
-    # Create mocks for torch
-    mock_torch = MagicMock()
-
-    # Mock nn.Module specifically as it is used as base class
-    class MockModule:
-        def __init__(self):
-            # Simulate nn.Module behavior of tracking buffers/params
-            self._buffers = {}
-            self._modules = {}
-
-        def register_buffer(self, name, tensor):
-            # Essential: set the attribute so it can be accessed later
-            setattr(self, name, tensor)
-            self._buffers[name] = tensor
-
-        def __call__(self, *args, **kwargs):
-            return MagicMock()
-
-        def to(self, device): return self
-        def eval(self): return self
-        def train(self): return self
-        def state_dict(self): return {}
-        def load_state_dict(self, state_dict): pass
-
-    mock_torch.nn = MagicMock()
-    mock_torch.nn.Module = MockModule
-    mock_torch.nn.functional = MagicMock()
-
-    # Mock tensor operations used in init
-    # linspace returns a mock that supports basic ops
-    mock_tensor = MagicMock()
-    # Support subtraction (1.0 - self.betas)
-    mock_tensor.__rsub__.return_value = mock_tensor
-    mock_tensor.__sub__.return_value = mock_tensor
-    # Support sqrt
-    mock_torch.sqrt.return_value = mock_tensor
-    # Support cumprod
-    mock_torch.cumprod.return_value = mock_tensor
-    # Support linspace
-    mock_torch.linspace.return_value = mock_tensor
-    # Support cos (for cosine schedule)
-    mock_torch.cos.return_value = mock_tensor
-    # Support clip
-    mock_torch.clip.return_value = mock_tensor
-
-    sys.modules['torch'] = mock_torch
-    sys.modules['torch.nn'] = mock_torch.nn
-    sys.modules['torch.nn.functional'] = mock_torch.nn.functional
-
-try:
-    import numpy
-except ImportError:
-    sys.modules['numpy'] = MagicMock()
-
-# Import the module under test
-# This must be done AFTER mocking
-from models.gaussian_diffusion import GaussianDiffusion
 
 def test_gaussian_diffusion_invalid_schedule_type():
     """Test that GaussianDiffusion raises ValueError for invalid schedule_type"""
@@ -182,7 +112,6 @@ def test_gaussian_diffusion_invalid_schedule_type():
 
 def test_gaussian_diffusion_valid_schedule_types():
     """Test that GaussianDiffusion accepts valid schedule types"""
-    # This test verifies that valid types do not raise exceptions.
     try:
         GaussianDiffusion(schedule_type="linear")
         GaussianDiffusion(schedule_type="cosine")
