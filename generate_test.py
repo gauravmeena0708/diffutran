@@ -40,7 +40,7 @@ def load_model(checkpoint_path, preprocessor_path, condition_encoder_path=None,
     
     # Checkpoint
     print(f"Loading checkpoint from {checkpoint_path}...")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     
     # Model Config
     num_numerical_features = len(preprocessor.numerical_cols)

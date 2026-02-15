@@ -63,7 +63,7 @@ def load_ds_flow_model(checkpoint_path, tokenizer_path, condition_encoder_path=N
     engine = OTCFM(backbone, tokenizer, config).to(device)
     
     # Weights
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     engine.load_state_dict(checkpoint)
     engine.eval()
     
