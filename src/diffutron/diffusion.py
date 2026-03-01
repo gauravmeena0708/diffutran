@@ -20,12 +20,13 @@ class GaussianDiffusion(nn.Module):
         
         # Define beta schedule
         if schedule_type == 'linear':
-            self.betas = torch.linspace(beta_start, beta_end, num_timesteps)
+            betas = torch.linspace(beta_start, beta_end, num_timesteps)
         elif schedule_type == 'cosine':
-            self.betas = self._cosine_beta_schedule(num_timesteps)
+            betas = self._cosine_beta_schedule(num_timesteps)
         else:
             raise ValueError(f"Unknown schedule type: {schedule_type}")
-        
+        self.register_buffer('betas', betas)
+
         # Pre-compute diffusion parameters
         self.register_buffer('alphas', 1.0 - self.betas)
         self.register_buffer('alphas_cumprod', torch.cumprod(self.alphas, dim=0))
@@ -118,26 +119,7 @@ class GaussianDiffusion(nn.Module):
         else:
             # CFG: epsilon = epsilon_uncond + w * (epsilon_cond - epsilon_uncond)
             # We assume condition=None triggers unconditional generation in the model
-            
-            # 1. Duplicate x for batched inference
-            x_in = torch.cat([x, x])
-            t_in = torch.cat([t, t])
-            
-            # 2. Conditions: [unconditional, conditional]
-            # Depending on model implementation, we might pass None or a null token
-            # Here we assume the model handles `condition` argument
-            # If `condition` is a tensor, we need an empty/null tensor for unconditional
-            
-            # Actually, simpler to do two forward passes if we don't know the exact batching logic of the model
-            # or usage of `null_condition`.
-            # Let's try batched if possible.
-            
-            # Predict conditional noise
             noise_cond = model(x, t, condition=condition)
-            
-            # Predict unconditional noise
-            # We need a way to pass "null condition" to the model.
-            # We'll assume the model accepts `condition=None` for unconditional.
             noise_uncond = model(x, t, condition=None)
             
             predicted_noise = noise_uncond + guidance_scale * (noise_cond - noise_uncond)

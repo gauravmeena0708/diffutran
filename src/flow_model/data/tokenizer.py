@@ -11,12 +11,12 @@ class QuantileTokenizer(nn.Module):
     - Fits LabelEncoders for categorical features.
     - Provides embeddings for categorical and linear projections for numerical.
     """
-    def __init__(self, d_model=512, n_quantiles=1000, output_dist='normal', device='cpu'):
+    def __init__(self, d_model=512, n_quantiles=1000, output_dist='normal'):
         super().__init__()
         self.d_model = d_model
         self.n_quantiles = n_quantiles
         self.output_dist = output_dist
-        self.device = device
+        self.register_buffer('_device_tracker', torch.zeros(1))
         
         # State
         self.numerical_cols = []
@@ -28,15 +28,17 @@ class QuantileTokenizer(nn.Module):
         # Embeddings (initialized during fit)
         self.cat_embeddings = nn.ModuleDict()
         self.num_projections = nn.ModuleDict()
-        self.num_biases = nn.ParameterDict() # Bias for numerical projection
-        
         # Decoders (for reconstruction)
         self.cat_decoders = nn.ModuleDict()
         self.num_decoders = nn.ModuleDict()
         
         # Metadata
         self.cardinalities = {}
-        
+
+    @property
+    def device(self):
+        return self._device_tracker.device
+
     def fit(self, df, categorical_cols=None):
         """Fit transformers and initialize embedding layers"""
         df = df.copy()
@@ -244,6 +246,7 @@ class QuantileTokenizer(nn.Module):
                 col: {
                     'quantiles_': qt.quantiles_.tolist(),
                     'references_': qt.references_.tolist(),
+                    'n_quantiles_': qt.n_quantiles_,
                     'output_distribution': qt.output_distribution,
                 } for col, qt in self.quantile_transformers.items()
             }
@@ -279,7 +282,6 @@ class QuantileTokenizer(nn.Module):
             d_model=metadata['d_model'],
             n_quantiles=metadata['n_quantiles'],
             output_dist=metadata['output_dist'],
-            device=device
         )
 
         instance.numerical_cols = metadata['numerical_cols']
@@ -300,6 +302,7 @@ class QuantileTokenizer(nn.Module):
             )
             qt.quantiles_ = np.array(qt_state['quantiles_'])
             qt.references_ = np.array(qt_state['references_'])
+            qt.n_quantiles_ = qt_state.get('n_quantiles_', qt.quantiles_.shape[0])
             instance.quantile_transformers[col] = qt
 
         # Initialize layers (Embeddings/Projections) - matching fit() logic

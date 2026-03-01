@@ -62,10 +62,8 @@ def train_ds_flow(args):
             cat_cols.remove(condition_col)
         # If it was numerical, we treat it as categorical for conditioning.
             
-    tokenizer = QuantileTokenizer(
-        d_model=config.d_model, 
-        device=device
-    )
+    tokenizer = QuantileTokenizer(d_model=config.d_model)
+    tokenizer.to(device)
     
     print("Fitting tokenizer...")
     # Pass df but specify cols
