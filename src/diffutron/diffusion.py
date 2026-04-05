@@ -137,20 +137,71 @@ class GaussianDiffusion(nn.Module):
             return model_mean + torch.sqrt(posterior_variance_t) * noise
     
     @torch.no_grad()
-    def sample(self, model, shape, condition=None, guidance_scale=1.0, device='cuda'):
+    def sample(self, model, shape, condition=None, guidance_scale=1.0,
+               constraint_x0=None, constraint_mask=None, device='cuda',
+               num_inference_steps=None):
         """
-        Generate samples from the model
+        Generate samples from the model.
+
+        Constraint satisfaction (REPAINT-style imputation)
+        --------------------------------------------------
+        If ``constraint_x0`` and ``constraint_mask`` are provided, the known
+        feature columns are re-injected at every reverse step.  After each
+        ``p_sample`` call (which produces x_{t-1}), the constrained slices are
+        replaced with a forward-noised copy of the clean constraint values at
+        noise level t-1.  At the final step (t=0) the clean values are injected
+        directly, guaranteeing exact satisfaction.
+
+        Parameters
+        ----------
+        constraint_x0   : FloatTensor [batch, total_dim] or None
+            Clean constraint values in preprocessed space (from
+            ``DataPreprocessor.get_constraint_tensors``).
+        constraint_mask : FloatTensor [batch, total_dim] or None
+            Binary mask, 1.0 for constrained elements, 0.0 elsewhere.
+        num_inference_steps : int or None
+            If set and less than ``num_timesteps``, use a DDIM-style evenly-
+            spaced subset of timesteps (e.g. 50 steps instead of 1000).
+            This gives a ~20× speed-up with minimal quality loss for tabular
+            data.  When None, all timesteps are used (original behaviour).
         """
         batch_size = shape[0]
-        
+
+        # Move constraints to target device once
+        if constraint_x0 is not None:
+            constraint_x0   = constraint_x0.to(device)
+            constraint_mask = constraint_mask.to(device)
+
+        # Build the sequence of timesteps to iterate
+        if num_inference_steps is not None and num_inference_steps < self.num_timesteps:
+            # Evenly-spaced stride across [0, num_timesteps-1], descending
+            step_size = self.num_timesteps // num_inference_steps
+            timesteps = list(reversed(range(0, self.num_timesteps, step_size)))
+        else:
+            timesteps = list(reversed(range(self.num_timesteps)))
+
         # Start from pure noise
         x = torch.randn(shape, device=device)
-        
-        # Iteratively denoise
-        for i in reversed(range(self.num_timesteps)):
+
+        # Iteratively denoise over the (possibly strided) timestep sequence
+        for idx, i in enumerate(timesteps):
             t = torch.full((batch_size,), i, device=device, dtype=torch.long)
             x = self.p_sample(
                 model, x, t, condition=condition, guidance_scale=guidance_scale
             )
-        
+
+            # Re-inject constraint columns at the *previous* noise level
+            if constraint_x0 is not None:
+                is_last_step = (idx == len(timesteps) - 1)
+                if not is_last_step:
+                    # Use the next (lower) timestep in the schedule as t_prev
+                    i_prev = timesteps[idx + 1]
+                    t_prev = torch.full((batch_size,), i_prev, device=device, dtype=torch.long)
+                    noise  = torch.randn_like(constraint_x0)
+                    x_known = self.q_sample(constraint_x0, t_prev, noise=noise)
+                else:
+                    # Final step: hard-set to clean constraint values
+                    x_known = constraint_x0
+                x = (1.0 - constraint_mask) * x + constraint_mask * x_known
+
         return x

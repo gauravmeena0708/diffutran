@@ -165,3 +165,40 @@ def test_sample_shape(mock_model):
     # Restore original torch.full
     torch.full = original_full
 
+
+def test_sample_fast_inference_steps_shape(mock_model):
+    """Test that num_inference_steps produces output with the correct shape."""
+    diffusion = GaussianDiffusion(num_timesteps=100)
+    shape = (4, 8)
+
+    generated = diffusion.sample(
+        mock_model, shape, device='cpu', num_inference_steps=10
+    )
+
+    assert generated.shape == shape
+
+
+def test_sample_fast_inference_steps_fewer_calls(mock_model):
+    """With num_inference_steps=5, the model should be called exactly 5 times."""
+    num_timesteps = 100
+    num_inference_steps = 5
+    diffusion = GaussianDiffusion(num_timesteps=num_timesteps)
+    shape = (2, 6)
+
+    diffusion.sample(
+        mock_model, shape, device='cpu',
+        num_inference_steps=num_inference_steps
+    )
+
+    assert mock_model.call_count == num_inference_steps
+
+
+def test_sample_full_steps_when_none(mock_model):
+    """When num_inference_steps=None, all timesteps are used."""
+    num_timesteps = 20
+    diffusion = GaussianDiffusion(num_timesteps=num_timesteps)
+    shape = (2, 4)
+
+    diffusion.sample(mock_model, shape, device='cpu', num_inference_steps=None)
+
+    assert mock_model.call_count == num_timesteps

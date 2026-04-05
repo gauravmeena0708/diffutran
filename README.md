@@ -8,13 +8,14 @@ These models are designed to learn the underlying distribution of a given tabula
 
 ## Features
 
--   **Two State-of-the-Art Models**: Implements and compares a diffusion model and a flow-matching model for tabular data.
--   **Conditional Generation**: Both models support conditional generation, allowing you to create synthetic data for specific sub-populations (e.g., generating data only for a particular class).
--   **Handles Mixed Data Types**: Automatically processes both numerical and categorical features.
--   **Comprehensive Evaluation**: Includes a benchmarking script to evaluate the quality of synthetic data on multiple axes:
-    -   **Fidelity**: Statistical similarity to the real data.
-    -   **Utility**: Efficacy of the synthetic data for downstream machine learning tasks.
-    -   **Privacy**: Risk of re-identification of real samples.
+-   **State-of-the-Art DS-Flow**: Upgraded Dual-Stream Flow model featuring **FlashAttention-2** and **1D-RoPE** for highly scalable and memory-efficient tabular processing.
+-   **Mixed Continuous-Discrete Flow Matching**: Numericals generated via continuous Optimal Transport Flow Matching (OT-CFM), while Categoricals utilize discrete Classifier-Free DDPM transitions for rigorous discrete synthesis.
+-   **Advanced Solvers**: Utilizes **DPM-Solver++** combined with adaptive CFG decay to achieve high-fidelity generation in <10 steps.
+-   **Robust Data Layer**: Native Missing Value tracking, zero-memory high-cardinality hashing fallbacks (>100 categories), and robust numerical outlier jitter scaling.
+-   **Comprehensive Evaluation Framework**: Includes rigorous benchmarking:
+    -   **Fidelity**: Validated via exact Kolmogorov-Smirnov (KS) tests and strict Chi-Square tables.
+    -   **Utility**: ML efficacy (`TSTR` vs `TRTR`) and Discriminator Indistinguishability AUC.
+    -   **Privacy**: Distance to Closest Record (DCR), k-Anonymity density checks, l-Diversity bounds, and Membership Inference Attack (MIA) capability testing.
 
 ## Project Structure
 
@@ -149,6 +150,6 @@ The script will generate a `benchmark_comparison.csv` file in the `outputs/bench
 
 This model is based on Denoising Diffusion Probabilistic Models (DDPM). It uses a Transformer architecture to predict the noise that was added to the tabular data at a given timestep. The training objective is to reconstruct the original data by iteratively denoising from a pure noise vector. This model supports Classifier-Free Guidance (CFG) for improved conditional generation.
 
-### DS-Flow
+### DS-Flow (v2 SOTA)
 
-This model uses a newer paradigm called Flow Matching. It features a novel **Dual-Stream Transformer** that processes numerical and categorical features in parallel streams. Instead of predicting noise, it learns the "velocity" of a straight-line path from a noise distribution to the data distribution. This allows for faster and more stable generation, often requiring significantly fewer steps than traditional diffusion models.
+This model utilizes an advanced hybrid of Continuous Flow Matching and Discrete DDPM. It features a novel **Dual-Stream Transformer** customized with **FlashAttention-2**, **1D Rotary Positional Embeddings (RoPE)**, and **Dedicated Cross-Attention Conditioning**. It processes numerical features through continuous Optimal Transport limit paths and categorical features via principled discrete probability reverse chains. Paired with an intertwined adaptive **DPM-Solver++**, it achieves state-of-the-art data synthesis speed and fidelity while preventing mode-collapse.

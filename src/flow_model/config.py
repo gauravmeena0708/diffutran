@@ -11,6 +11,7 @@ class DSFlowConfig:
     
     # Flow Matching
     sigma_min: float = 1e-4
+    reconstruction_loss_weight: float = 0.1  # Weight for reconstruction loss to prevent embedding collapse
     
     # Training
     batch_size: int = 512

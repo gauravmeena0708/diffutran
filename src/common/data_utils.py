@@ -139,6 +139,49 @@ class DataPreprocessor:
             
         return pd.DataFrame(df_dict)[self.column_info['all_columns']]
     
+    def get_constraint_tensors(self, constraints, batch_size, device='cpu'):
+        """
+        Build constraint_x0 and constraint_mask tensors from a {col: value} dict.
+
+        The flat tensor layout is:
+          [num_0, num_1, ..., num_N-1 | cat_0 one-hot | cat_1 one-hot | ...]
+
+        Returns
+        -------
+        constraint_x0   : FloatTensor [batch_size, total_dim]
+            Constraint values in preprocessed (scaled / one-hot) space.
+            Zero everywhere that is not constrained.
+        constraint_mask : FloatTensor [batch_size, total_dim]
+            1.0 for every element that belongs to a constrained column, else 0.0.
+        """
+        total_dim = len(self.numerical_cols) + sum(self.categorical_cardinalities)
+        constraint_x0   = torch.zeros(batch_size, total_dim)
+        constraint_mask = torch.zeros(batch_size, total_dim)
+
+        for col, val in constraints.items():
+            if col in self.numerical_cols:
+                idx = self.numerical_cols.index(col)
+                scaled = float(self.scalers[col].transform([[float(val)]])[0, 0])
+                constraint_x0[:, idx]   = scaled
+                constraint_mask[:, idx] = 1.0
+
+            elif col in self.categorical_cols:
+                offset = len(self.numerical_cols)
+                for i, c in enumerate(self.categorical_cols):
+                    card = self.categorical_cardinalities[i]
+                    if c == col:
+                        class_idx = int(
+                            self.label_encoders[col].transform([str(val)])[0]
+                        )
+                        one_hot = torch.zeros(card)
+                        one_hot[class_idx] = 1.0
+                        constraint_x0[:, offset : offset + card]   = one_hot
+                        constraint_mask[:, offset : offset + card] = 1.0
+                        break
+                    offset += card
+
+        return constraint_x0.to(device), constraint_mask.to(device)
+
     def save(self, path):
         """Save preprocessor state"""
         state = {
