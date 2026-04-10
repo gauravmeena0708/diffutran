@@ -3,6 +3,7 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import QuantileTransformer, LabelEncoder
+import re
 
 class QuantileTokenizer(nn.Module):
     """
@@ -36,6 +37,13 @@ class QuantileTokenizer(nn.Module):
         
         # Metadata
         self.cardinalities = {}
+
+    @staticmethod
+    def _module_key(col: str) -> str:
+        """Return a stable PyTorch-safe key for ModuleDict storage."""
+        safe = re.sub(r"[^0-9A-Za-z_]+", "_", str(col))
+        safe = re.sub(r"_+", "_", safe).strip("_")
+        return f"col_{safe or 'unnamed'}"
 
     @property
     def device(self):
@@ -81,8 +89,9 @@ class QuantileTokenizer(nn.Module):
                 cardinality = len(le.classes_)
                 
             self.cardinalities[col] = cardinality
-            self.cat_embeddings[col] = nn.Embedding(cardinality, self.d_model)
-            self.cat_decoders[col] = nn.Linear(self.d_model, cardinality)
+            key = self._module_key(col)
+            self.cat_embeddings[key] = nn.Embedding(cardinality, self.d_model)
+            self.cat_decoders[key] = nn.Linear(self.d_model, cardinality)
             
         # 3. Fit Numerical
         for col in self.numerical_cols:
@@ -100,9 +109,10 @@ class QuantileTokenizer(nn.Module):
                 
             qt.fit(data.reshape(-1, 1))
             self.quantile_transformers[col] = qt
-            
-            self.num_projections[col] = nn.Linear(1, self.d_model)
-            self.num_decoders[col] = nn.Linear(self.d_model, 1)
+
+            key = self._module_key(col)
+            self.num_projections[key] = nn.Linear(1, self.d_model)
+            self.num_decoders[key] = nn.Linear(self.d_model, 1)
             
         return self
 
@@ -154,12 +164,12 @@ class QuantileTokenizer(nn.Module):
         all_embeddings = []
         for i, col in enumerate(self.numerical_cols):
             tensor = x_num[:, i].unsqueeze(1).to(self.device)
-            embedding = self.num_projections[col](tensor).unsqueeze(1)
+            embedding = self.num_projections[self._module_key(col)](tensor).unsqueeze(1)
             all_embeddings.append(embedding)
             
         for i, col in enumerate(self.categorical_cols):
             tensor = x_cat[:, i].to(self.device) 
-            embedding = self.cat_embeddings[col](tensor).unsqueeze(1)
+            embedding = self.cat_embeddings[self._module_key(col)](tensor).unsqueeze(1)
             all_embeddings.append(embedding)
             
         return torch.cat(all_embeddings, dim=1) if all_embeddings else torch.empty(x_num.shape[0], 0, self.d_model, device=self.device)
@@ -173,13 +183,13 @@ class QuantileTokenizer(nn.Module):
         current_idx = 0
         for col in self.numerical_cols:
             token = x_tokens[:, current_idx, :]
-            val = self.num_decoders[col](token)
+            val = self.num_decoders[self._module_key(col)](token)
             decoded[col] = val
             current_idx += 1
             
         for col in self.categorical_cols:
             token = x_tokens[:, current_idx, :]
-            logits = self.cat_decoders[col](token)
+            logits = self.cat_decoders[self._module_key(col)](token)
             decoded[col] = logits
             current_idx += 1
         return decoded
@@ -295,12 +305,14 @@ class QuantileTokenizer(nn.Module):
             
         for col in instance.categorical_cols:
             c = instance.cardinalities[col]
-            instance.cat_embeddings[col] = nn.Embedding(c, instance.d_model)
-            instance.cat_decoders[col] = nn.Linear(instance.d_model, c)
+            key = instance._module_key(col)
+            instance.cat_embeddings[key] = nn.Embedding(c, instance.d_model)
+            instance.cat_decoders[key] = nn.Linear(instance.d_model, c)
             
         for col in instance.numerical_cols:
-            instance.num_projections[col] = nn.Linear(1, instance.d_model)
-            instance.num_decoders[col] = nn.Linear(instance.d_model, 1)
+            key = instance._module_key(col)
+            instance.num_projections[key] = nn.Linear(1, instance.d_model)
+            instance.num_decoders[key] = nn.Linear(instance.d_model, 1)
             
         instance.load_state_dict(data['state_dict'])
         instance.to(device)
