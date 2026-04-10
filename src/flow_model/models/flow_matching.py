@@ -69,7 +69,9 @@ class OTCFM(nn.Module):
             # Embed perturbed categorical tokens
             xt_cat_emb = []
             for i, col in enumerate(self.tokenizer.categorical_cols):
-                emb = self.tokenizer.cat_embeddings[col](xt_cat_idx[:, i]).unsqueeze(1)
+                emb = self.tokenizer.cat_embeddings[
+                    self.tokenizer._module_key(col)
+                ](xt_cat_idx[:, i]).unsqueeze(1)
                 xt_cat_emb.append(emb)
             xt_cat_emb = torch.cat(xt_cat_emb, dim=1)
             xt_list.append(xt_cat_emb)
@@ -93,7 +95,9 @@ class OTCFM(nn.Module):
         if N_cat > 0:
             pred_cat_emb = vt[:, N_num:, :]
             for i, col in enumerate(self.tokenizer.categorical_cols):
-                logits = self.tokenizer.cat_decoders[col](pred_cat_emb[:, i, :])
+                logits = self.tokenizer.cat_decoders[
+                    self.tokenizer._module_key(col)
+                ](pred_cat_emb[:, i, :])
                 target = x_cat[:, i].to(device)
                 loss_ce_cat += F.cross_entropy(logits, target)
             loss_ce_cat /= N_cat
@@ -196,7 +200,9 @@ class OTCFM(nn.Module):
                 qt = self.tokenizer.quantile_transformers[col]
                 val_qt = float(qt.transform([[float(val)]])[0, 0])
                 val_t  = torch.tensor([[val_qt]], device=device, dtype=torch.float32)
-                target_emb = self.tokenizer.num_projections[col](val_t).squeeze(0)  # [d_model]
+                target_emb = self.tokenizer.num_projections[
+                    self.tokenizer._module_key(col)
+                ](val_t).squeeze(0)  # [d_model]
                 pinned_num[i_col] = target_emb
 
         # Apply pins to initial state so first model call already sees them
@@ -222,7 +228,9 @@ class OTCFM(nn.Module):
             if N_cat > 0:
                 xt_cat_emb = []
                 for j, col in enumerate(self.tokenizer.categorical_cols):
-                    emb = self.tokenizer.cat_embeddings[col](xt_cat_idx[:, j]).unsqueeze(1)
+                    emb = self.tokenizer.cat_embeddings[
+                        self.tokenizer._module_key(col)
+                    ](xt_cat_idx[:, j]).unsqueeze(1)
                     xt_cat_emb.append(emb)
                 xt_list.append(torch.cat(xt_cat_emb, dim=1))
                 
@@ -249,7 +257,9 @@ class OTCFM(nn.Module):
             if N_cat > 0:
                 pred_cat_emb = vt[:, N_num:, :]
                 for j, col in enumerate(self.tokenizer.categorical_cols):
-                    logits = self.tokenizer.cat_decoders[col](pred_cat_emb[:, j, :])
+                    logits = self.tokenizer.cat_decoders[
+                        self.tokenizer._module_key(col)
+                    ](pred_cat_emb[:, j, :])
                     probs = torch.softmax(logits, dim=-1) # [B, Card]
 
                     x1_sampled = torch.multinomial(probs, num_samples=1).squeeze(-1)
@@ -270,7 +280,9 @@ class OTCFM(nn.Module):
         if N_cat > 0:
             xt_cat_emb = []
             for j, col in enumerate(self.tokenizer.categorical_cols):
-                emb = self.tokenizer.cat_embeddings[col](xt_cat_idx[:, j]).unsqueeze(1)
+                emb = self.tokenizer.cat_embeddings[
+                    self.tokenizer._module_key(col)
+                ](xt_cat_idx[:, j]).unsqueeze(1)
                 xt_cat_emb.append(emb)
             final_list.append(torch.cat(xt_cat_emb, dim=1))
             
