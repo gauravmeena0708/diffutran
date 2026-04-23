@@ -48,6 +48,11 @@ def main(args):
     os.makedirs(base_result_dir, exist_ok=True)
     
     datasets = [d for d in os.listdir(base_data_dir) if os.path.isdir(os.path.join(base_data_dir, d))]
+    if args.datasets:
+        missing = set(args.datasets) - set(datasets)
+        if missing:
+            print(f"Warning: requested datasets not found: {sorted(missing)}")
+        datasets = [d for d in datasets if d in args.datasets]
     
     all_results = []
     
@@ -76,40 +81,44 @@ def main(args):
         
         # 1. Train DS-Flow
         ds_model_dir = os.path.join(base_model_dir, ds, "dsflow")
-        train_cmd = [
-            "python", "-m", "src.flow_model.train",
-            "--data_path", data_path,
-            "--save_dir", ds_model_dir,
-            "--num_epochs", "1" if args.debug else str(args.epochs),
-            "--batch_size", "256",
-            "--d_model", "128" if args.debug else "512"
-        ]
-        if cat_cols:
-            train_cmd.extend(["--categorical_cols"] + cat_cols)
-        if target_col:
-            train_cmd.extend(["--condition_col", target_col])
-        if is_temporal:
-            train_cmd.extend(["--is_temporal", "--sequence_len", str(seq_len)])
-            
-        run_command(train_cmd, f"Training DS-Flow on {ds}")
+        if args.overwrite or _needs_training(ds_model_dir, ["model_final.pt", "tokenizer.pt"]):
+            train_cmd = [
+                "python", "-m", "src.flow_model.train",
+                "--data_path", data_path,
+                "--save_dir", ds_model_dir,
+                "--num_epochs", "1" if args.debug else str(args.epochs),
+                "--batch_size", "256",
+                "--d_model", "128" if args.debug else "512"
+            ]
+            if cat_cols:
+                train_cmd.extend(["--categorical_cols"] + cat_cols)
+            if target_col:
+                train_cmd.extend(["--condition_col", target_col])
+            if is_temporal:
+                train_cmd.extend(["--is_temporal", "--sequence_len", str(seq_len)])
+            run_command(train_cmd, f"Training DS-Flow on {ds}")
+        else:
+            print(f"[skip] DS-Flow checkpoint found for {ds} — use --overwrite to retrain")
         
         # 2. Train DiffuTron
         m1_model_dir = os.path.join(base_model_dir, ds, "diffutron")
         if not is_temporal:
-            train_m1_cmd = [
-                "python", "scripts/train.py",
-                "--data_path", data_path,
-                "--save_dir", m1_model_dir,
-                "--num_epochs", "1" if args.debug else str(args.epochs),
-                "--batch_size", "256",
-                "--hidden_dim", "128" if args.debug else "256"
-            ]
-            if cat_cols:
-                train_m1_cmd.extend(["--categorical_cols"] + cat_cols)
-            if target_col:
-                train_m1_cmd.extend(["--condition_col", target_col])
-                
-            run_command(train_m1_cmd, f"Training DiffuTron on {ds}")
+            if args.overwrite or _needs_training(m1_model_dir, ["checkpoint_epoch_final.pt"]):
+                train_m1_cmd = [
+                    "python", "scripts/train.py",
+                    "--data_path", data_path,
+                    "--save_dir", m1_model_dir,
+                    "--num_epochs", "1" if args.debug else str(args.epochs),
+                    "--batch_size", "256",
+                    "--hidden_dim", "128" if args.debug else "256"
+                ]
+                if cat_cols:
+                    train_m1_cmd.extend(["--categorical_cols"] + cat_cols)
+                if target_col:
+                    train_m1_cmd.extend(["--condition_col", target_col])
+                run_command(train_m1_cmd, f"Training DiffuTron on {ds}")
+            else:
+                print(f"[skip] DiffuTron checkpoint found for {ds} — use --overwrite to retrain")
             
         # 3. Sample all variants — each in its own subdir to avoid filename collisions
         syn_ds_dir = os.path.join(base_syn_dir, ds)
