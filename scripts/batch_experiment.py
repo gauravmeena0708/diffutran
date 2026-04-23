@@ -233,7 +233,16 @@ print(json.dumps(result))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--debug', action='store_true', help="Run with small batch/epochs for testing.")
-    parser.add_argument('--epochs', type=int, default=10, help="Number of training epochs per dataset.")
+    parser.add_argument('--debug', action='store_true',
+                        help="1 epoch, 100 samples, d_model=128 for fast smoke-testing.")
+    parser.add_argument('--epochs', type=int, default=10,
+                        help="Training epochs per model.")
+    parser.add_argument('--models', nargs='+', default=['diffutron', 'dsflow'],
+                        choices=['diffutron', 'dsflow'],
+                        help="Model families to run (default: both).")
+    parser.add_argument('--datasets', nargs='+', default=None,
+                        help="Datasets to run (default: all in workdir/data/processed/).")
+    parser.add_argument('--overwrite', action='store_true',
+                        help="Re-train even if checkpoint exists (default: skip if trained).")
     args = parser.parse_args()
     main(args)
