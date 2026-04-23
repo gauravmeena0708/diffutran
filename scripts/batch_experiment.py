@@ -81,28 +81,29 @@ def main(args):
         
         # 1. Train DS-Flow
         ds_model_dir = os.path.join(base_model_dir, ds, "dsflow")
-        if args.overwrite or _needs_training(ds_model_dir, ["model_final.pt", "tokenizer.pt"]):
-            train_cmd = [
-                "python", "-m", "src.flow_model.train",
-                "--data_path", data_path,
-                "--save_dir", ds_model_dir,
-                "--num_epochs", "1" if args.debug else str(args.epochs),
-                "--batch_size", "256",
-                "--d_model", "128" if args.debug else "512"
-            ]
-            if cat_cols:
-                train_cmd.extend(["--categorical_cols"] + cat_cols)
-            if target_col:
-                train_cmd.extend(["--condition_col", target_col])
-            if is_temporal:
-                train_cmd.extend(["--is_temporal", "--sequence_len", str(seq_len)])
-            run_command(train_cmd, f"Training DS-Flow on {ds}")
-        else:
-            print(f"[skip] DS-Flow checkpoint found for {ds} — use --overwrite to retrain")
+        if 'dsflow' in args.models:
+            if args.overwrite or _needs_training(ds_model_dir, ["model_final.pt", "tokenizer.pt"]):
+                train_cmd = [
+                    "python", "-m", "src.flow_model.train",
+                    "--data_path", data_path,
+                    "--save_dir", ds_model_dir,
+                    "--num_epochs", "1" if args.debug else str(args.epochs),
+                    "--batch_size", "256",
+                    "--d_model", "128" if args.debug else "512"
+                ]
+                if cat_cols:
+                    train_cmd.extend(["--categorical_cols"] + cat_cols)
+                if target_col:
+                    train_cmd.extend(["--condition_col", target_col])
+                if is_temporal:
+                    train_cmd.extend(["--is_temporal", "--sequence_len", str(seq_len)])
+                run_command(train_cmd, f"Training DS-Flow on {ds}")
+            else:
+                print(f"[skip] DS-Flow checkpoint found for {ds} — use --overwrite to retrain")
         
         # 2. Train DiffuTron
         m1_model_dir = os.path.join(base_model_dir, ds, "diffutron")
-        if not is_temporal:
+        if 'diffutron' in args.models and not is_temporal:
             if args.overwrite or _needs_training(m1_model_dir, ["checkpoint_epoch_final.pt"]):
                 train_m1_cmd = [
                     "python", "scripts/train.py",
@@ -128,32 +129,33 @@ def main(args):
         current_constraints = [f"{constraint_col}={constraint_val}"] if constraint_col else []
         variant_outputs = []  # (label, sf_path, eff)
 
-        for cfg in DSFLOW_CONFIGS:
-            variant_dir = os.path.join(syn_ds_dir, cfg["label"])
-            os.makedirs(variant_dir, exist_ok=True)
-            start = time.time()
-            cmd = [
-                "python", "-m", "src.flow_model.sampler",
-                "--checkpoint_path", os.path.join(ds_model_dir, "model_final.pt"),
-                "--tokenizer_path", os.path.join(ds_model_dir, "tokenizer.pt"),
-                "--dataset_name", ds,
-                "--output_dir", variant_dir,
-                "--num_samples", str(n_samp),
-                "--steps", str(cfg["steps"]),
-                "--solver", cfg["solver"],
-                "--d_model", "128" if args.debug else "512",
-            ]
-            if target_col:
-                cmd.extend(["--condition_col", target_col])
-            if constraint_col and constraint_val:
-                cmd.extend(["--constraint", f"{constraint_col}={constraint_val}"])
-            run_command(cmd, f"Sampling {cfg['label']} for {ds}")
-            eff = (time.time() - start) / (n_samp / 1000)
-            files = sorted(f for f in os.listdir(variant_dir) if f.endswith(".csv"))
-            if files:
-                variant_outputs.append((cfg["label"], os.path.join(variant_dir, files[-1]), eff))
+        if 'dsflow' in args.models:
+            for cfg in DSFLOW_CONFIGS:
+                variant_dir = os.path.join(syn_ds_dir, cfg["label"])
+                os.makedirs(variant_dir, exist_ok=True)
+                start = time.time()
+                cmd = [
+                    "python", "-m", "src.flow_model.sampler",
+                    "--checkpoint_path", os.path.join(ds_model_dir, "model_final.pt"),
+                    "--tokenizer_path", os.path.join(ds_model_dir, "tokenizer.pt"),
+                    "--dataset_name", ds,
+                    "--output_dir", variant_dir,
+                    "--num_samples", str(n_samp),
+                    "--steps", str(cfg["steps"]),
+                    "--solver", cfg["solver"],
+                    "--d_model", "128" if args.debug else "512",
+                ]
+                if target_col:
+                    cmd.extend(["--condition_col", target_col])
+                if constraint_col and constraint_val:
+                    cmd.extend(["--constraint", f"{constraint_col}={constraint_val}"])
+                run_command(cmd, f"Sampling {cfg['label']} for {ds}")
+                eff = (time.time() - start) / (n_samp / 1000)
+                files = sorted(f for f in os.listdir(variant_dir) if f.endswith(".csv"))
+                if files:
+                    variant_outputs.append((cfg["label"], os.path.join(variant_dir, files[-1]), eff))
 
-        if not is_temporal:
+        if 'diffutron' in args.models and not is_temporal:
             for cfg in DIFFUTRON_CONFIGS:
                 variant_dir = os.path.join(syn_ds_dir, cfg["label"])
                 os.makedirs(variant_dir, exist_ok=True)
