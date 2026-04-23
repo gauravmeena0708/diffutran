@@ -215,6 +215,9 @@ def train_diffusion_model(
         os.makedirs(save_dir, exist_ok=True)
         import joblib
         joblib.dump(le, os.path.join(save_dir, 'condition_encoder.joblib'))
+        # Also save as JSON for generate_test.py default expectation
+        with open(os.path.join(save_dir, 'condition_encoder.json'), 'w') as f:
+            json.dump(le.classes_.tolist(), f)
     
     # Preprocess data
     print("Preprocessing data...")

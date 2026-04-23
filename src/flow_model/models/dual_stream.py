@@ -89,7 +89,7 @@ class FlashAttention(nn.Module):
         
         if rope_cos is not None and rope_sin is not None:
             qx = apply_rope(qx, rope_cos[:, :N_q, :, :], rope_sin[:, :N_q, :, :])
-            if N_q == N_k:
+            if N_q == N_k:  # only apply to K for self-attention; never pass rope args to cross-attention
                 kx = apply_rope(kx, rope_cos[:, :N_k, :, :], rope_sin[:, :N_k, :, :])
 
         qx = qx.transpose(1, 2)
@@ -198,20 +198,34 @@ class DualStreamTransformer(nn.Module):
         self.head = nn.Linear(d_model, d_model)
 
     def forward(self, x, t, y=None):
-        B, N, D = x.shape
-        t_emb = self.t_embedder(t).unsqueeze(1)
+        # x: [B, N, D] or [B, T, N, D]
+        is_temporal = (x.dim() == 4)
+        if is_temporal:
+            B, T, N, D = x.shape
+            x = x.reshape(B, T * N, D)
+            global_tok = self.global_token.expand(B, T, -1) # One global token per time step
+        else:
+            B, N, D = x.shape
+            global_tok = self.global_token.expand(B, 1, -1)
+            
+        t_emb = self.t_embedder(t).unsqueeze(1) # [B, 1, D]
         x = x + t_emb
+        global_tok = global_tok + t_emb
         
-        global_tok = self.global_token.expand(B, -1, -1) + t_emb
         y_emb = self.class_embedder(y).unsqueeze(1) if y is not None and self.num_classes is not None else None
         
-        rope_cos, rope_sin = self.rope(seq_len=N)
+        rope_cos, rope_sin = self.rope(seq_len=x.shape[1])
         
         for layer in self.layers:
             x, global_tok = layer(x, global_tok, rope_cos, rope_sin, y_emb)
             
         x = self.output_norm(x)
-        return self.head(x)
+        out = self.head(x)
+        
+        if is_temporal:
+            out = out.view(B, T, N, D)
+            
+        return out
 
 if __name__ == "__main__":
     t_model = DualStreamTransformer(d_model=64, n_layers=2, n_heads=4, d_ff=128, num_classes=5)

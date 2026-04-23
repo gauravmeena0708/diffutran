@@ -12,12 +12,14 @@ class QuantileTokenizer(nn.Module):
     - Fits LabelEncoders for categorical features (with Hash Fallback for high cardinality).
     - Handles np.nan missing values natively via categorical indicators.
     """
-    def __init__(self, d_model=512, n_quantiles=1000, output_dist='normal', max_cardinality=100):
+    def __init__(self, d_model=512, n_quantiles=1000, output_dist='normal', max_cardinality=100, is_temporal=False, sequence_len=1):
         super().__init__()
         self.d_model = d_model
         self.n_quantiles = n_quantiles
         self.output_dist = output_dist
         self.max_cardinality = max_cardinality
+        self.is_temporal = is_temporal
+        self.sequence_len = sequence_len
         self.register_buffer('_device_tracker', torch.zeros(1))
         
         # State
@@ -118,6 +120,7 @@ class QuantileTokenizer(nn.Module):
 
     def preprocess(self, df):
         df = df.copy()
+        batch_size = len(df)
         
         if self.numerical_cols:
             x_nums = []
@@ -134,33 +137,41 @@ class QuantileTokenizer(nn.Module):
                 x_nums.append(transformed)
             x_num = torch.FloatTensor(np.hstack(x_nums))
         else:
-            x_num = torch.empty(len(df), 0)
+            x_num = torch.empty(batch_size, 0)
             
         if self.categorical_cols:
             x_cats = []
             for col in self.categorical_cols:
                 if col not in df.columns:
-                    # Should only happen if user didn't provide indicator
                     df[col] = '<MISSING>'
                 data = df[col].fillna('<MISSING>').astype(str).values
                 
                 if self.is_hashed[col]:
-                    # Deterministic hash
                     indices = np.array([hash(str(x)) % self.max_cardinality for x in data]).reshape(-1, 1)
                 else:
                     le = self.label_encoders[col]
-                    # Handle unseen categories
                     known_mask = np.isin(data, le.classes_)
                     data[~known_mask] = '<MISSING>' if '<MISSING>' in le.classes_ else le.classes_[0]
                     indices = le.transform(data).reshape(-1, 1)
                 x_cats.append(indices)
             x_cat = torch.LongTensor(np.hstack(x_cats))
         else:
-            x_cat = torch.empty(len(df), 0, dtype=torch.long)
+            x_cat = torch.empty(batch_size, 0, dtype=torch.long)
+            
+        if self.is_temporal:
+            B = batch_size // self.sequence_len
+            x_num = x_num.view(B, self.sequence_len, -1)
+            x_cat = x_cat.view(B, self.sequence_len, -1)
             
         return x_num, x_cat
 
     def forward(self, x_num, x_cat):
+        is_3d = (x_num.dim() == 3) or (x_cat.dim() == 3)
+        if is_3d:
+            B, T, _ = x_num.shape if x_num.dim() == 3 else x_cat.shape
+            x_num = x_num.reshape(B * T, -1)
+            x_cat = x_cat.reshape(B * T, -1)
+
         all_embeddings = []
         for i, col in enumerate(self.numerical_cols):
             tensor = x_num[:, i].unsqueeze(1).to(self.device)
@@ -172,13 +183,24 @@ class QuantileTokenizer(nn.Module):
             embedding = self.cat_embeddings[self._module_key(col)](tensor).unsqueeze(1)
             all_embeddings.append(embedding)
             
-        return torch.cat(all_embeddings, dim=1) if all_embeddings else torch.empty(x_num.shape[0], 0, self.d_model, device=self.device)
+        res = torch.cat(all_embeddings, dim=1) if all_embeddings else torch.empty(x_num.shape[0], 0, self.d_model, device=self.device)
+        
+        if is_3d:
+            N = len(self.numerical_cols) + len(self.categorical_cols)
+            res = res.view(B, T, N, self.d_model)
+            
+        return res
 
     def transform(self, df):
         x_num, x_cat = self.preprocess(df)
         return self.forward(x_num, x_cat)
 
     def decode(self, x_tokens):
+        is_4d = (x_tokens.dim() == 4)
+        if is_4d:
+            B, T, N, D = x_tokens.shape
+            x_tokens = x_tokens.view(B * T, N, D)
+
         decoded = {}
         current_idx = 0
         for col in self.numerical_cols:
@@ -192,22 +214,35 @@ class QuantileTokenizer(nn.Module):
             logits = self.cat_decoders[self._module_key(col)](token)
             decoded[col] = logits
             current_idx += 1
+            
+        if is_4d:
+            for col in decoded:
+                v = decoded[col]
+                decoded[col] = v.view(B, T, -1)
         return decoded
 
     def inverse_transform(self, x_tokens):
-        decoded = self.decode(x_tokens)
+        is_4d = (x_tokens.dim() == 4)
+        if is_4d:
+            B, T, N, D = x_tokens.shape
+            x_tokens_flat = x_tokens.view(B * T, N, D)
+        else:
+            x_tokens_flat = x_tokens
+
+        decoded = self.decode(x_tokens_flat)
         df_dict = {}
         
         for col in self.numerical_cols:
             val_tensor = decoded[col].detach().cpu().numpy()
+            if is_4d: val_tensor = val_tensor.reshape(-1, 1)
             qt = self.quantile_transformers[col]
-            # Clip slightly to avoid inf
             val_tensor = np.clip(val_tensor, -5.0, 5.0)
             original_val = qt.inverse_transform(val_tensor)
             df_dict[col] = original_val.flatten()
             
         for col in self.categorical_cols:
             logits = decoded[col].detach().cpu().numpy()
+            if is_4d: logits = logits.reshape(-1, logits.shape[-1])
             indices = np.argmax(logits, axis=1)
             
             if self.is_hashed[col]:
@@ -220,8 +255,14 @@ class QuantileTokenizer(nn.Module):
         for col, ind_col in self.missing_indicators.items():
             mask = (df_dict[ind_col] == 'True')
             df_dict[col] = np.where(mask, np.nan, df_dict[col])
-            del df_dict[ind_col] # Remove indicator from final output
-            
+            del df_dict[ind_col]
+
+        for col in df_dict:
+            if col in self.original_dtypes:
+                dtype = self.original_dtypes.get(col)
+                if dtype is not None and pd.api.types.is_integer_dtype(dtype):
+                    df_dict[col] = np.round(df_dict[col]).astype(dtype)
+
         return pd.DataFrame(df_dict)
 
     def recover_dataframe(self, num_vals, cat_indices):
@@ -257,6 +298,8 @@ class QuantileTokenizer(nn.Module):
             'n_quantiles': self.n_quantiles,
             'output_dist': self.output_dist,
             'max_cardinality': self.max_cardinality,
+            'is_temporal': self.is_temporal,
+            'sequence_len': self.sequence_len,
             'numerical_cols': self.numerical_cols,
             'categorical_cols': self.categorical_cols,
             'cardinalities': self.cardinalities,
@@ -270,7 +313,8 @@ class QuantileTokenizer(nn.Module):
                     'n_quantiles_': qt.n_quantiles_,
                     'output_distribution': qt.output_distribution,
                 } for col, qt in self.quantile_transformers.items()
-            }
+            },
+            'original_dtypes': {col: str(dt) for col, dt in self.original_dtypes.items()},
         }
         torch.save({'state_dict': state_dict, 'metadata': metadata}, path)
     
@@ -283,13 +327,17 @@ class QuantileTokenizer(nn.Module):
             d_model=metadata['d_model'],
             n_quantiles=metadata['n_quantiles'],
             output_dist=metadata['output_dist'],
-            max_cardinality=metadata.get('max_cardinality', 100)
+            max_cardinality=metadata.get('max_cardinality', 100),
+            is_temporal=metadata.get('is_temporal', False),
+            sequence_len=metadata.get('sequence_len', 1),
         )
         instance.numerical_cols = metadata['numerical_cols']
         instance.categorical_cols = metadata['categorical_cols']
         instance.cardinalities = metadata['cardinalities']
         instance.is_hashed = metadata.get('is_hashed', {c: False for c in instance.categorical_cols})
         instance.missing_indicators = metadata.get('missing_indicators', {})
+        instance.original_dtypes = {col: np.dtype(dt_str)
+                                     for col, dt_str in metadata.get('original_dtypes', {}).items()}
         
         for col, classes in metadata['label_encoders'].items():
             le = LabelEncoder()
@@ -301,6 +349,8 @@ class QuantileTokenizer(nn.Module):
             qt.quantiles_ = np.array(qt_state['quantiles_'])
             qt.references_ = np.array(qt_state['references_'])
             qt.n_quantiles_ = qt_state.get('n_quantiles_', qt.quantiles_.shape[0])
+            qt.n_features_in_ = 1
+            qt._sparse_fit = False
             instance.quantile_transformers[col] = qt
             
         for col in instance.categorical_cols:

@@ -42,8 +42,10 @@ class EvaluationFramework:
         metrics = {}
         # Numerical: Wasserstein & KS Test
         for col in self.numerical_cols:
-            real_vals = self.real_data[col].dropna()
-            syn_vals = self.synthetic_data[col].dropna()
+            # Ensure strictly numeric and drop NaN
+            real_vals = pd.to_numeric(self.real_data[col], errors='coerce').dropna().astype(float)
+            syn_vals = pd.to_numeric(self.synthetic_data[col], errors='coerce').dropna().astype(float)
+            
             if len(real_vals) > 0 and len(syn_vals) > 0:
                 metrics[f'WD_{col}'] = wasserstein_distance(real_vals, syn_vals)
                 ks_stat, p_val = ks_2samp(real_vals, syn_vals)
@@ -57,8 +59,8 @@ class EvaluationFramework:
             real_counts = self.real_data[col].astype(str).value_counts().reindex(full_cats, fill_value=0)
             syn_counts = self.synthetic_data[col].astype(str).value_counts().reindex(full_cats, fill_value=0)
             
-            p = (real_counts / real_counts.sum()).values
-            q = (syn_counts / syn_counts.sum()).values
+            p = (real_counts / (real_counts.sum() + 1e-8)).values
+            q = (syn_counts / (syn_counts.sum() + 1e-8)).values
             
             metrics[f'JSD_{col}'] = jensenshannon(p, q)
             
@@ -89,9 +91,19 @@ class EvaluationFramework:
     def evaluate_utility(self):
         if self.target_col is None or self.target_col not in self.real_data.columns:
             return {}
+            
+        # Select features only (X)
         X_real = self.real_encoded.drop(columns=[self.target_col])
         y_real = self.real_data[self.target_col]
-        X_syn = self.syn_encoded.drop(columns=[self.target_col])
+        
+        # Ensure synthetic features match the EXACT columns and ORDER of X_real
+        if self.target_col in self.syn_encoded.columns:
+            X_syn = self.syn_encoded.drop(columns=[self.target_col])
+        else:
+            X_syn = self.syn_encoded
+            
+        # Reorder/Filter columns to match exactly
+        X_syn = X_syn[X_real.columns]
         y_syn = self.synthetic_data[self.target_col]
         
         if self.task_type == 'classification':
@@ -195,6 +207,33 @@ class EvaluationFramework:
                 l_divs = self.synthetic_data.groupby(qis)[sens].nunique()
                 metrics['l_Diversity'] = l_divs.min() if len(l_divs) > 0 else 0
 
+        return metrics
+
+    # 4. DIVERSITY
+    def evaluate_diversity(self):
+        """
+        Evaluate how much of the real data manifold/variety is captured.
+        """
+        metrics = {}
+        
+        # 4.1 Categorical Coverage
+        for col in self.categorical_cols:
+            real_cats = set(self.real_data[col].astype(str).unique())
+            syn_cats = set(self.synthetic_data[col].astype(str).unique())
+            coverage = len(syn_cats.intersection(real_cats)) / len(real_cats)
+            metrics[f'Coverage_{col}'] = coverage
+            
+        # 4.2 Numerical Range Coverage
+        for col in self.numerical_cols:
+            r_min, r_max = self.real_data[col].min(), self.real_data[col].max()
+            s_min, s_max = self.synthetic_data[col].min(), self.synthetic_data[col].max()
+            
+            # Intersection of ranges
+            i_min = max(r_min, s_min)
+            i_max = min(r_max, s_max)
+            overlap = max(0, i_max - i_min) / (r_max - r_min + 1e-8)
+            metrics[f'Range_Coverage_{col}'] = overlap
+            
         return metrics
 
 if __name__ == "__main__":

@@ -20,6 +20,8 @@ def sample_ds_flow(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
+    condition_col = args.condition_col
+    
     # 1. Load Tokenizer (Sklearn state + Structure)
     print(f"Loading tokenizer from {args.tokenizer_path}...")
     # Warning: joblib loading a nn.Module might require the class definition to be exactly same
@@ -34,32 +36,12 @@ def sample_ds_flow(args):
     config.d_model = args.d_model # Ensure this matches training!
     # Ideally config should be saved too.
     
-    # 3. Model
-    print("Initializing Model...")
-    backbone = DualStreamTransformer(
-        d_model=config.d_model,
-        n_layers=config.n_layers,
-        n_heads=config.n_heads,
-        d_ff=config.d_ff,
-        dropout=config.dropout
-    ).to(device)
-    
-    engine = OTCFM(backbone, tokenizer, config).to(device)
-    
-    # 4. Load Weights
-    print(f"Loading checkpoint from {args.checkpoint_path}...")
-    checkpoint = torch.load(args.checkpoint_path, map_location=device, weights_only=True)
-    engine.load_state_dict(checkpoint)
-    
-    # Condition Handling
-    y_cond = None
+    # Determine num_classes from encoder if conditioning
+    num_classes = None
     le_condition = None
-    condition_col = args.condition_col
-    
     if condition_col:
         dir_name = os.path.dirname(args.checkpoint_path)
         encoder_path = os.path.join(dir_name, 'condition_encoder.joblib')
-        # Try both .json and .joblib for compatibility
         if not os.path.exists(encoder_path):
             encoder_path = os.path.join(dir_name, 'condition_encoder.json')
 
@@ -74,18 +56,55 @@ def sample_ds_flow(args):
             else:
                 le_condition = joblib.load(encoder_path)
             num_classes = len(le_condition.classes_)
-            
-            # Generate y
-            # Simple approach: Sample uniformly (or from specific distribution if implemented)
-            # For now: Uniform
-            print(f"Sampling {condition_col} uniformly from {num_classes} classes...")
-            y_cond = torch.randint(0, num_classes, (args.num_samples,), device=device)
-        else:
-            print(f"Warning: condition_col provided but {encoder_path} not found.")
+
+    # 3. Model
+    print("Initializing Model...")
+    backbone = DualStreamTransformer(
+        d_model=config.d_model,
+        n_layers=config.n_layers,
+        n_heads=config.n_heads,
+        d_ff=config.d_ff,
+        dropout=config.dropout,
+        num_classes=num_classes
+    ).to(device)
+    
+    engine = OTCFM(backbone, tokenizer, config).to(device)
+    
+    # 4. Load Weights
+    print(f"Loading checkpoint from {args.checkpoint_path}...")
+    checkpoint = torch.load(args.checkpoint_path, map_location=device, weights_only=True)
+    engine.load_state_dict(checkpoint)
+    
+    # Condition Handling
+    y_cond = None
+    if condition_col and num_classes is not None:
+        # Generate y
+        print(f"Sampling {condition_col} uniformly from {num_classes} classes...")
+        y_cond = torch.randint(0, num_classes, (args.num_samples,), device=device)
+
+    # Constraint Handling
+    cat_constraints = {}
+    num_constraints = {}
+    if args.constraint:
+        for c in args.constraint:
+            if '=' in c:
+                col, val = c.split('=', 1)
+                col, val = col.strip(), val.strip()
+                if col in tokenizer.categorical_cols:
+                    cat_constraints[col] = val
+                elif col in tokenizer.numerical_cols:
+                    num_constraints[col] = float(val)
 
     # 5. Sample
-    print(f"Generating {args.num_samples} samples...")
-    x_tokens = engine.sample(args.num_samples, steps=args.steps, y=y_cond)
+    print(f"Generating {args.num_samples} samples using {args.solver} solver with {args.steps} steps...")
+    x_tokens = engine.sample(
+        args.num_samples, 
+        steps=args.steps, 
+        y=y_cond, 
+        solver=args.solver,
+        cat_constraints=cat_constraints if cat_constraints else None,
+        num_constraints=num_constraints if num_constraints else None
+    )
     
     # 6. Reconstruct
     print("Reconstructing DataFrame...")
@@ -133,6 +152,7 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', type=str, default='results_dsflow')
     parser.add_argument('--num_samples', type=int, default=1000)
     parser.add_argument('--steps', type=int, default=20)
+    parser.add_argument('--solver', type=str, default='dpm++', choices=['euler', 'dpm++'], help="ODE solver to use for continuous numerical variables.")
     parser.add_argument('--d_model', type=int, default=512)
     parser.add_argument('--condition_col', type=str, default=None)
     parser.add_argument('--constraint', type=str, action='append', help='Add a constraint in format column=value. Can be used multiple times.')

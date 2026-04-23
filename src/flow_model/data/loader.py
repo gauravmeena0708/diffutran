@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
@@ -19,19 +20,23 @@ class DSDataset(Dataset):
         # Handle Condition
         self.y = None
         if condition_col is not None and label_encoder is not None:
-             # Drop condition from input features?
-             # Usually standard practice is to drop target/condition from features if it's the target
-             # But here we pass full DF to preprocess.
-             # We should probably handle this outside, but let's assume DF passed to tokenizer 
-             # ALREADY had condition_col dropped OR we just extract it here?
-             # If tokenizer was fit on DF *with* condition_col, it will treat it as a feature.
-             # We must ensure tokenizer is fit on X (without y).
-             # We will handle this in train.py.
-             # Here we assume df has y.
              y_data = df[condition_col].astype(str).values
-             self.y = torch.LongTensor(label_encoder.transform(y_data))
+             known_mask = np.isin(y_data, label_encoder.classes_)
+             y_data[~known_mask] = label_encoder.classes_[0]
+             y_indices = label_encoder.transform(y_data)
+             self.y = torch.LongTensor(y_indices)
+             
+             if tokenizer.is_temporal:
+                 # Reshape y to [Batch, Time]
+                 B = len(self.y) // tokenizer.sequence_len
+                 self.y = self.y.view(B, tokenizer.sequence_len)
+                 # Optionally: Take last step label if model expects [Batch]
+                 # For now, keep as [B, T] and let model handle if it wants [B]
+                 # But our DualStreamTransformer expects [B] for class_embedder.
+                 # Let's take the first step label for the whole sequence for now.
+                 self.y = self.y[:, 0] 
         
-        # Preprocess features (df should ideally not contain condition_col if we don't want it as feature)
+        # Preprocess features
         self.x_num, self.x_cat = tokenizer.preprocess(df)
         
     def __len__(self):

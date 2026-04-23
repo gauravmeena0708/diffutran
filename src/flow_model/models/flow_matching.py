@@ -26,25 +26,35 @@ class OTCFM(nn.Module):
         """
         Compute joint Flow Matching + Cross-Entropy Loss.
         Args:
-            x_num: [B, N_num] Float
-            x_cat: [B, N_cat] Long
+            x_num: [B, N_num] or [B, T, N_num] Float
+            x_cat: [B, N_cat] or [B, T, N_cat] Long
             y: [B] Long (Optional Class Labels)
         Returns:
             loss: scalar tensor
             logs: dict of metrics
         """
-        batch_size = x_num.shape[0] if x_num.shape[1] > 0 else x_cat.shape[0]
-        device = x_num.device if x_num.shape[1] > 0 else x_cat.device
+        device = x_num.device if x_num.nelement() > 0 else x_cat.device
+        is_temporal = (x_num.dim() == 3) or (x_cat.dim() == 3)
         
+        if is_temporal:
+            B, T, _ = x_num.shape if x_num.dim() == 3 else x_cat.shape
+            batch_size = B
+        else:
+            batch_size = x_num.shape[0] if x_num.nelement() > 0 else x_cat.shape[0]
+            
         t = torch.rand(batch_size, device=device)
-        t_expanded = t.view(-1, 1, 1)
+        # For temporal, we might want different t per step? 
+        # But for simplicity, we use same t for the whole sequence per batch.
+        t_expanded = t.view(-1, 1, 1) # [B, 1, 1]
+        if is_temporal:
+             t_expanded = t_expanded.unsqueeze(1) # [B, 1, 1, 1]
 
         N_num = len(self.tokenizer.numerical_cols) if hasattr(self.tokenizer, 'numerical_cols') else 0
         N_cat = len(self.tokenizer.categorical_cols) if hasattr(self.tokenizer, 'categorical_cols') else 0
 
         # 1. Forward transform to get the target clean tokens x1
-        x1_all = self.tokenizer.forward(x_num, x_cat) # [B, N_num + N_cat, D]
-        x1_num = x1_all[:, :N_num, :] if N_num > 0 else None
+        x1_all = self.tokenizer.forward(x_num, x_cat) # [B, N, D] or [B, T, N, D]
+        x1_num = x1_all[..., :N_num, :] if N_num > 0 else None
         
         xt_list = []
         ut_num = None
@@ -59,24 +69,38 @@ class OTCFM(nn.Module):
         # 3. Discrete Flow for Categoricals
         if N_cat > 0:
             xt_cat_idx = x_cat.clone()
+            # For categoricals, we need to iterate columns. 
+            # If temporal, x_cat is [B, T, N_cat]
             for i, col in enumerate(self.tokenizer.categorical_cols):
                 cardinality = self.tokenizer.cardinalities[col]
                 # Probability of keeping original token is t
-                keep_mask = torch.rand(batch_size, device=device) < t
-                random_class = torch.randint(0, cardinality, (batch_size,), device=device)
-                xt_cat_idx[:, i] = torch.where(keep_mask, xt_cat_idx[:, i], random_class)
+                # We need to match shape of x_cat[:, i] or x_cat[:, :, i]
+                t_slice = t if not is_temporal else t.view(-1, 1)
+                keep_mask = torch.rand(xt_cat_idx[..., i].shape, device=device) < t_slice
+                random_class = torch.randint(0, cardinality, xt_cat_idx[..., i].shape, device=device)
+                xt_cat_idx[..., i] = torch.where(keep_mask, xt_cat_idx[..., i], random_class)
             
             # Embed perturbed categorical tokens
+            # We must flatten temporal if present for cat_embeddings call
+            if is_temporal:
+                xt_cat_idx_flat = xt_cat_idx.view(B * T, N_cat)
+            else:
+                xt_cat_idx_flat = xt_cat_idx
+                
             xt_cat_emb = []
             for i, col in enumerate(self.tokenizer.categorical_cols):
                 emb = self.tokenizer.cat_embeddings[
                     self.tokenizer._module_key(col)
-                ](xt_cat_idx[:, i]).unsqueeze(1)
+                ](xt_cat_idx_flat[:, i]).unsqueeze(1)
                 xt_cat_emb.append(emb)
             xt_cat_emb = torch.cat(xt_cat_emb, dim=1)
+            
+            if is_temporal:
+                xt_cat_emb = xt_cat_emb.view(B, T, N_cat, -1)
+                
             xt_list.append(xt_cat_emb)
 
-        xt = torch.cat(xt_list, dim=1) if len(xt_list) > 1 else xt_list[0]
+        xt = torch.cat(xt_list, dim=-2) if len(xt_list) > 1 else xt_list[0]
         
         if y is not None:
              y = y.to(device)
@@ -89,21 +113,27 @@ class OTCFM(nn.Module):
         loss_ce_cat = torch.tensor(0.0, device=device)
         
         if N_num > 0:
-            pred_v_num = vt[:, :N_num, :]
+            pred_v_num = vt[..., :N_num, :]
             loss_flow_num = F.mse_loss(pred_v_num, ut_num)
             
         if N_cat > 0:
-            pred_cat_emb = vt[:, N_num:, :]
+            pred_cat_emb = vt[..., N_num:, :]
+            # Flatten for CE loss
+            if is_temporal:
+                pred_cat_emb = pred_cat_emb.reshape(B * T, N_cat, -1)
+                x_cat_target = x_cat.reshape(B * T, N_cat)
+            else:
+                x_cat_target = x_cat
+                
             for i, col in enumerate(self.tokenizer.categorical_cols):
                 logits = self.tokenizer.cat_decoders[
                     self.tokenizer._module_key(col)
                 ](pred_cat_emb[:, i, :])
-                target = x_cat[:, i].to(device)
+                target = x_cat_target[:, i].to(device)
                 loss_ce_cat += F.cross_entropy(logits, target)
             loss_ce_cat /= N_cat
         
-        # 6. Reconstruction Loss: Prevent embedding collapse by forcing decodability
-        # This ensures the tokenizer embeddings remain semantically meaningful
+        # 6. Reconstruction Loss
         loss_rec = torch.tensor(0.0, device=device)
         if self.reconstruction_loss_weight > 0:
             decoded = self.tokenizer.decode(x1_all)
@@ -111,16 +141,20 @@ class OTCFM(nn.Module):
             # Reconstruction loss for numericals
             if N_num > 0:
                 for i, col in enumerate(self.tokenizer.numerical_cols):
-                    pred_val = decoded[col]  # [B, 1]
-                    true_val = x_num[:, i:i+1]  # [B, 1]
+                    pred_val = decoded[col]  
+                    true_val = x_num[..., i:i+1]
                     loss_rec += F.mse_loss(pred_val, true_val)
                 loss_rec /= N_num
             
             # Reconstruction loss for categoricals
             if N_cat > 0:
                 for i, col in enumerate(self.tokenizer.categorical_cols):
-                    logits = decoded[col]  # [B, cardinality]
-                    target = x_cat[:, i]  # [B]
+                    logits = decoded[col]  
+                    target = x_cat[..., i]
+                    # Reshape for CE if temporal
+                    if is_temporal:
+                        logits = logits.reshape(-1, logits.shape[-1])
+                        target = target.reshape(-1)
                     loss_rec += F.cross_entropy(logits, target)
                 loss_rec /= N_cat
             
@@ -135,24 +169,14 @@ class OTCFM(nn.Module):
 
     @torch.no_grad()
     def sample(self, n_samples, steps=20, y=None, w_max=3.0,
-               cat_constraints=None, num_constraints=None):
+               cat_constraints=None, num_constraints=None, solver='dpm++'):
         """
         Generate samples using DPM-Solver++ (Continuous) & Discrete DDPM, with Adaptive CFG.
 
-        Constraint satisfaction
-        -----------------------
-        cat_constraints : dict {col_name: str_value} or None
-            Categorical columns to hard-pin.  The string value is encoded via
-            the tokenizer's LabelEncoder at the start of sampling and the
-            resulting class index is forced into ``xt_cat_idx`` after every
-            discrete reverse step, so the transformer always sees the correct
-            token for that column.
-
-        num_constraints : dict {col_name: float_value} or None
-            Numerical columns to hard-pin (values in original data space).
-            Each target scalar is quantile-transformed and projected to embedding
-            space via ``num_projections[col]``, then written into ``xt_num``
-            after every Euler step.
+        Parameters
+        ----------
+        solver : str
+            'euler' or 'dpm++' (2nd-order Midpoint ODE solver).
         """
         self.model.eval()
         device = next(self.model.parameters()).device
@@ -205,7 +229,7 @@ class OTCFM(nn.Module):
                 ](val_t).squeeze(0)  # [d_model]
                 pinned_num[i_col] = target_emb
 
-        # Apply pins to initial state so first model call already sees them
+        # Apply pins to initial state
         for j, idx_tensor in pinned_cat.items():
             xt_cat_idx[:, j] = idx_tensor
         for i_col, emb in pinned_num.items():
@@ -214,78 +238,89 @@ class OTCFM(nn.Module):
 
         times = torch.linspace(0, 1, steps + 1, device=device)
         
-        # Adaptive Integration Loop
-        for i in range(steps):
-            t_curr = times[i]
-            t_next = times[i+1]
-            dt = t_next - t_curr
-            t_batch = torch.full((n_samples,), t_curr.item(), device=device)
-            
-            # Prepare full xt
+        def get_velocity(xt_n, xt_c_idx, t_val, y_val):
+            t_batch = torch.full((n_samples,), t_val, device=device)
             xt_list = []
             if N_num > 0:
-                xt_list.append(xt_num)
+                xt_list.append(xt_n)
             if N_cat > 0:
                 xt_cat_emb = []
                 for j, col in enumerate(self.tokenizer.categorical_cols):
                     emb = self.tokenizer.cat_embeddings[
                         self.tokenizer._module_key(col)
-                    ](xt_cat_idx[:, j]).unsqueeze(1)
+                    ](xt_c_idx[:, j]).unsqueeze(1)
                     xt_cat_emb.append(emb)
                 xt_list.append(torch.cat(xt_cat_emb, dim=1))
-                
-            xt = torch.cat(xt_list, dim=1) if len(xt_list) > 1 else xt_list[0]
             
-            # Adaptive CFG Evaluation
-            if y is not None:
-                vt_cond = self.model(xt, t_batch, y)
-                vt_uncond = self.model(xt, t_batch, None)
-                w_t = w_max * (1.0 - t_curr.item()) # Decay from w_max to 0
-                vt = vt_uncond + w_t * (vt_cond - vt_uncond)
+            xt_full = torch.cat(xt_list, dim=1) if len(xt_list) > 1 else xt_list[0]
+            
+            if y_val is not None:
+                vt_cond = self.model(xt_full, t_batch, y_val)
+                vt_uncond = self.model(xt_full, t_batch, None)
+                w_t = w_max * (1.0 - t_val)
+                return vt_uncond + w_t * (vt_cond - vt_uncond)
             else:
-                vt = self.model(xt, t_batch, y)
-                
-            # DPM-Solver 1st Order Step for Continuous Numericals
+                return self.model(xt_full, t_batch, None)
+
+        # Adaptive Integration Loop
+        for i in range(steps):
+            t_curr = times[i].item()
+            t_next = times[i+1].item()
+            dt = t_next - t_curr
+            
+            # Continuous Solver Step (Numerical)
             if N_num > 0:
-                pred_v_num = vt[:, :N_num, :]
-                xt_num = xt_num + pred_v_num * dt
-                # Re-pin constrained numerical columns after Euler step
+                vt = get_velocity(xt_num, xt_cat_idx, t_curr, y)
+                v_num = vt[:, :N_num, :]
+                
+                if solver == 'dpm++' and i < steps - 1:
+                    # 2nd-order Midpoint Step
+                    xt_mid = xt_num + v_num * (dt * 0.5)
+                    # Re-pin for intermediate step
+                    for i_col, emb in pinned_num.items():
+                        xt_mid[:, i_col, :] = emb
+                    
+                    vt_mid = get_velocity(xt_mid, xt_cat_idx, t_curr + dt*0.5, y)
+                    v_num_mid = vt_mid[:, :N_num, :]
+                    xt_num = xt_num + v_num_mid * dt
+                else:
+                    # 1st-order Euler Step
+                    xt_num = xt_num + v_num * dt
+                
+                # Re-pin constrained numerical columns
                 for i_col, emb in pinned_num.items():
                     xt_num[:, i_col, :] = emb
+            else:
+                # Still need vt for categorical updates
+                vt = get_velocity(None, xt_cat_idx, t_curr, y)
 
-            # Discrete Reverse DDPM Step for Categoricals
+            # Discrete Reverse DDPM Step (Categorical)
             if N_cat > 0:
                 pred_cat_emb = vt[:, N_num:, :]
                 for j, col in enumerate(self.tokenizer.categorical_cols):
                     logits = self.tokenizer.cat_decoders[
                         self.tokenizer._module_key(col)
                     ](pred_cat_emb[:, j, :])
-                    probs = torch.softmax(logits, dim=-1) # [B, Card]
-
+                    probs = torch.softmax(logits, dim=-1)
                     x1_sampled = torch.multinomial(probs, num_samples=1).squeeze(-1)
 
-                    keep_mask = torch.rand(n_samples, device=device) < t_next.item()
+                    keep_mask = torch.rand(n_samples, device=device) < t_next
                     cardinality = self.tokenizer.cardinalities[col]
                     random_class = torch.randint(0, cardinality, (n_samples,), device=device)
                     xt_cat_idx[:, j] = torch.where(keep_mask, x1_sampled, random_class)
 
-                # Re-pin constrained categorical columns after discrete update
                 for j, idx_tensor in pinned_cat.items():
                     xt_cat_idx[:, j] = idx_tensor
                     
-        # Return final state which should be fully decoded to x1
+        # Return final state: numericals as ODE endpoint embeddings,
+        # categoricals as last velocity outputs — inverse_transform expects
+        # cat_decoders(vt_cat) → logits, not cat_embeddings(idx).
         final_list = []
         if N_num > 0:
             final_list.append(xt_num)
         if N_cat > 0:
-            xt_cat_emb = []
-            for j, col in enumerate(self.tokenizer.categorical_cols):
-                emb = self.tokenizer.cat_embeddings[
-                    self.tokenizer._module_key(col)
-                ](xt_cat_idx[:, j]).unsqueeze(1)
-                xt_cat_emb.append(emb)
-            final_list.append(torch.cat(xt_cat_emb, dim=1))
-            
+            final_list.append(vt[:, N_num:, :])
+
         return torch.cat(final_list, dim=1) if len(final_list) > 1 else final_list[0]
 
 if __name__ == "__main__":

@@ -35,6 +35,9 @@ class DataPreprocessor:
         self.numerical_cols = []
         self.column_info = {}
         self.categorical_cardinalities = []
+        self.col_min = {}
+        self.col_max = {}
+        self.integer_cols = set()
     
     def fit_transform(self, df, categorical_cols=None):
         """
@@ -64,6 +67,13 @@ class DataPreprocessor:
             cardinality = len(le.classes_)
             self.categorical_cardinalities.append(cardinality)
         
+        # Record per-column training range and integer status before scaling
+        for col in self.numerical_cols:
+            self.col_min[col] = float(df[col].min())
+            self.col_max[col] = float(df[col].max())
+            if pd.api.types.is_integer_dtype(df[col]):
+                self.integer_cols.add(col)
+
         # Scale numerical columns
         for col in self.numerical_cols:
             scaler = StandardScaler()
@@ -123,7 +133,12 @@ class DataPreprocessor:
         # 1. Numerical
         for col in self.numerical_cols:
             val = data[:, current_idx : current_idx + 1]
-            df_dict[col] = self.scalers[col].inverse_transform(val).flatten()
+            values = self.scalers[col].inverse_transform(val).flatten()
+            if col in self.col_min:
+                values = np.clip(values, self.col_min[col], self.col_max[col])
+            if col in self.integer_cols:
+                values = np.round(values).astype(int)
+            df_dict[col] = values
             current_idx += 1
             
         # 2. Categorical
@@ -189,8 +204,11 @@ class DataPreprocessor:
             'categorical_cardinalities': self.categorical_cardinalities,
             'scalers': {col: {'mean': scaler.mean_.tolist(), 'scale': scaler.scale_.tolist()}
                        for col, scaler in self.scalers.items()},
-            'label_encoders': {col: le.classes_.tolist() 
-                             for col, le in self.label_encoders.items()}
+            'label_encoders': {col: le.classes_.tolist()
+                             for col, le in self.label_encoders.items()},
+            'col_min': self.col_min,
+            'col_max': self.col_max,
+            'integer_cols': list(self.integer_cols),
         }
         with open(path, 'w') as f:
             json.dump(state, f, indent=2)
@@ -219,3 +237,7 @@ class DataPreprocessor:
             le = LabelEncoder()
             le.classes_ = np.array(classes)
             self.label_encoders[col] = le
+
+        self.col_min = state.get('col_min', {})
+        self.col_max = state.get('col_max', {})
+        self.integer_cols = set(state.get('integer_cols', []))

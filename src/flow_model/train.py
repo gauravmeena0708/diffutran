@@ -44,6 +44,7 @@ def train_ds_flow(args):
         num_classes = len(le_condition.classes_)
         
         # Save condition encoder
+        os.makedirs(args.save_dir, exist_ok=True)
         with open(os.path.join(args.save_dir, 'condition_encoder.json'), 'w') as f:
             json.dump(le_condition.classes_.tolist(), f)
         
@@ -62,7 +63,11 @@ def train_ds_flow(args):
             cat_cols.remove(condition_col)
         # If it was numerical, we treat it as categorical for conditioning.
             
-    tokenizer = QuantileTokenizer(d_model=config.d_model)
+    tokenizer = QuantileTokenizer(
+        d_model=config.d_model, 
+        is_temporal=args.is_temporal, 
+        sequence_len=args.sequence_len
+    )
     tokenizer.to(device)
     
     print("Fitting tokenizer...")
@@ -141,6 +146,10 @@ def train_ds_flow(args):
         
         for batch in pbar:
             x_num, x_cat, y = batch
+            x_num = x_num.to(device)
+            x_cat = x_cat.to(device)
+            if y is not None:
+                y = y.to(device)
             
             # Loss Calculation
             loss, logs = engine.compute_loss(x_num, x_cat, y)
@@ -179,6 +188,8 @@ if __name__ == '__main__':
     parser.add_argument('--d_model', type=int, default=512)
     parser.add_argument('--n_layers', type=int, default=6)
     parser.add_argument('--n_heads', type=int, default=8)
+    parser.add_argument('--is_temporal', action='store_true', help="Whether the data is temporal/sequential.")
+    parser.add_argument('--sequence_len', type=int, default=1, help="Sequence length for temporal data.")
     
     args = parser.parse_args()
     train_ds_flow(args)

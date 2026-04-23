@@ -102,105 +102,101 @@ class GaussianDiffusion(nn.Module):
         return loss
     
     @torch.no_grad()
-    def p_sample(self, model, x, t, condition=None, guidance_scale=1.0):
+    def p_sample(self, model, x, t, t_prev=None, condition=None, guidance_scale=1.0, eta=0.0):
         """
         Reverse diffusion process: sample x_{t-1} from x_t
-        Supports Classifier-Free Guidance (CFG)
+        Supports both DDPM (eta=1.0) and DDIM (eta=0.0) sampling.
         """
-        betas_t = self._extract(self.betas, t, x.shape)
-        sqrt_one_minus_alphas_cumprod_t = self._extract(
-            self.sqrt_one_minus_alphas_cumprod, t, x.shape
-        )
-        sqrt_recip_alphas_t = self._extract(self.sqrt_recip_alphas, t, x.shape)
+        # Extract parameters for current timestep t
+        alphas_cumprod_t = self._extract(self.alphas_cumprod, t, x.shape)
         
         # Predict noise
         if guidance_scale == 1.0 or condition is None:
             predicted_noise = model(x, t, condition=condition)
         else:
             # CFG: epsilon = epsilon_uncond + w * (epsilon_cond - epsilon_uncond)
-            # We assume condition=None triggers unconditional generation in the model
             noise_cond = model(x, t, condition=condition)
             noise_uncond = model(x, t, condition=None)
-            
             predicted_noise = noise_uncond + guidance_scale * (noise_cond - noise_uncond)
         
-        # Mean of the reverse process
-        model_mean = sqrt_recip_alphas_t * (
-            x - betas_t * predicted_noise / sqrt_one_minus_alphas_cumprod_t
-        )
+        # If t_prev is not provided, we assume standard DDPM step (t_prev = t-1)
+        if t_prev is None:
+            if t[0] == 0:
+                # Special case for final step
+                sqrt_recip_alphas_t = self._extract(self.sqrt_recip_alphas, t, x.shape)
+                betas_t = self._extract(self.betas, t, x.shape)
+                sqrt_one_minus_alphas_cumprod_t = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x.shape)
+                return sqrt_recip_alphas_t * (x - betas_t * predicted_noise / sqrt_one_minus_alphas_cumprod_t)
+            t_prev = t - 1
+
+        alphas_cumprod_t_prev = self._extract(self.alphas_cumprod, t_prev, x.shape)
+
+        # DDIM Formula:
+        # 1. Predict x0
+        pred_x0 = (x - torch.sqrt(1 - alphas_cumprod_t) * predicted_noise) / torch.sqrt(alphas_cumprod_t)
         
-        if t[0] == 0:
-            return model_mean
-        else:
-            posterior_variance_t = self._extract(self.posterior_variance, t, x.shape)
+        # 2. Compute variance sigma_t
+        ratio = torch.clamp(1.0 - alphas_cumprod_t / alphas_cumprod_t_prev, min=0.0)
+        sigma_t = eta * torch.sqrt((1 - alphas_cumprod_t_prev) / (1 - alphas_cumprod_t) * ratio)
+        
+        # 3. Compute direction pointing to xt
+        pred_dir_xt = torch.sqrt(1 - alphas_cumprod_t_prev - sigma_t**2) * predicted_noise
+        
+        # 4. Final x_{t-1}
+        x_prev = torch.sqrt(alphas_cumprod_t_prev) * pred_x0 + pred_dir_xt
+        
+        if eta > 0:
             noise = torch.randn_like(x)
-            return model_mean + torch.sqrt(posterior_variance_t) * noise
-    
+            x_prev = x_prev + sigma_t * noise
+            
+        return x_prev
+
     @torch.no_grad()
     def sample(self, model, shape, condition=None, guidance_scale=1.0,
                constraint_x0=None, constraint_mask=None, device='cuda',
-               num_inference_steps=None):
+               num_inference_steps=None, eta=0.0):
         """
         Generate samples from the model.
-
-        Constraint satisfaction (REPAINT-style imputation)
-        --------------------------------------------------
-        If ``constraint_x0`` and ``constraint_mask`` are provided, the known
-        feature columns are re-injected at every reverse step.  After each
-        ``p_sample`` call (which produces x_{t-1}), the constrained slices are
-        replaced with a forward-noised copy of the clean constraint values at
-        noise level t-1.  At the final step (t=0) the clean values are injected
-        directly, guaranteeing exact satisfaction.
-
-        Parameters
-        ----------
-        constraint_x0   : FloatTensor [batch, total_dim] or None
-            Clean constraint values in preprocessed space (from
-            ``DataPreprocessor.get_constraint_tensors``).
-        constraint_mask : FloatTensor [batch, total_dim] or None
-            Binary mask, 1.0 for constrained elements, 0.0 elsewhere.
-        num_inference_steps : int or None
-            If set and less than ``num_timesteps``, use a DDIM-style evenly-
-            spaced subset of timesteps (e.g. 50 steps instead of 1000).
-            This gives a ~20× speed-up with minimal quality loss for tabular
-            data.  When None, all timesteps are used (original behaviour).
+        Supports DDIM (eta=0) and DDPM (eta=1) via the num_inference_steps.
         """
         batch_size = shape[0]
 
-        # Move constraints to target device once
         if constraint_x0 is not None:
             constraint_x0   = constraint_x0.to(device)
             constraint_mask = constraint_mask.to(device)
 
-        # Build the sequence of timesteps to iterate
+        # Build the sequence of timesteps
         if num_inference_steps is not None and num_inference_steps < self.num_timesteps:
-            # Evenly-spaced stride across [0, num_timesteps-1], descending
-            step_size = self.num_timesteps // num_inference_steps
-            timesteps = list(reversed(range(0, self.num_timesteps, step_size)))
+            # DDIM-style strided sampling
+            times = np.linspace(-1, self.num_timesteps - 1, num_inference_steps + 1, dtype=int)
+            # times is e.g. [-1, 19, 39, ..., 999]
+            timesteps = list(reversed(times[1:].tolist()))
+            timesteps_prev = list(reversed(times[:-1].tolist()))
         else:
             timesteps = list(reversed(range(self.num_timesteps)))
+            timesteps_prev = [t - 1 for t in timesteps]
 
-        # Start from pure noise
         x = torch.randn(shape, device=device)
 
-        # Iteratively denoise over the (possibly strided) timestep sequence
         for idx, i in enumerate(timesteps):
+            i_prev = timesteps_prev[idx]
             t = torch.full((batch_size,), i, device=device, dtype=torch.long)
+            
+            # Use t_prev only if it's >= 0
+            tp = torch.full((batch_size,), i_prev, device=device, dtype=torch.long) if i_prev >= 0 else None
+            
             x = self.p_sample(
-                model, x, t, condition=condition, guidance_scale=guidance_scale
+                model, x, t, t_prev=tp, condition=condition, 
+                guidance_scale=guidance_scale, eta=eta
             )
 
-            # Re-inject constraint columns at the *previous* noise level
+            # Re-inject constraints
             if constraint_x0 is not None:
-                is_last_step = (idx == len(timesteps) - 1)
-                if not is_last_step:
-                    # Use the next (lower) timestep in the schedule as t_prev
-                    i_prev = timesteps[idx + 1]
-                    t_prev = torch.full((batch_size,), i_prev, device=device, dtype=torch.long)
+                if i_prev >= 0:
+                    t_prev_tensor = torch.full((batch_size,), i_prev, device=device, dtype=torch.long)
                     noise  = torch.randn_like(constraint_x0)
-                    x_known = self.q_sample(constraint_x0, t_prev, noise=noise)
+                    x_known = self.q_sample(constraint_x0, t_prev_tensor, noise=noise)
                 else:
-                    # Final step: hard-set to clean constraint values
                     x_known = constraint_x0
                 x = (1.0 - constraint_mask) * x + constraint_mask * x_known
 

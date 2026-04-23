@@ -125,7 +125,7 @@ def generate_data(
     
     return synthetic_df
 
-def generate_synthetic_data(model, diffusion, preprocessor, num_samples, guidance_scale=1.0, condition_col=None, condition_encoder=None, sample_condition_dist=False, device='cuda', condition_specific_val=None):
+def generate_synthetic_data(model, diffusion, preprocessor, num_samples, guidance_scale=1.0, condition_col=None, condition_encoder=None, sample_condition_dist=False, device='cuda', condition_specific_val=None, num_inference_steps=None, eta=0.0):
     model.eval()
     
     # 1. Generate Conditions (y)
@@ -143,17 +143,22 @@ def generate_synthetic_data(model, diffusion, preprocessor, num_samples, guidanc
              # Balanced?
              y = torch.randint(0, model.num_classes, (num_samples,), device=device).long()
              
-    # 2. Sample Noise
+    # 2. Sample Noise & Generate
     # Infer dims from preprocessor
     num_num = len(preprocessor.numerical_cols)
     cards = preprocessor.categorical_cardinalities
     num_cat = sum(cards.values()) if isinstance(cards, dict) else sum(cards)
-    x = torch.randn((num_samples, num_num + num_cat), device=device)
     
-    # 3. Denoise loop
-    for i in reversed(range(diffusion.num_timesteps)):
-        t = torch.full((num_samples,), i, device=device, dtype=torch.long)
-        x = diffusion.p_sample(model, x, t, y, guidance_scale=guidance_scale)
+    # Use diffusion.sample to handle DDIM/DDPM and striding
+    x = diffusion.sample(
+        model, 
+        shape=(num_samples, num_num + num_cat),
+        condition=y,
+        guidance_scale=guidance_scale,
+        device=device,
+        num_inference_steps=num_inference_steps,
+        eta=eta
+    )
         
     # 4. Inverse Transform
     df_syn = preprocessor.inverse_transform(x.cpu().numpy())
@@ -215,7 +220,9 @@ def main(args):
             condition_col=args.condition_col,
             condition_encoder=condition_encoder,
             sample_condition_dist=args.sample_condition_dist,
-            device=device
+            device=device,
+            num_inference_steps=args.num_inference_steps,
+            eta=args.eta
         )
             
         synthetics.append(syn_batch_df)
@@ -332,19 +339,28 @@ def main(args):
 
     # Save metrics
     res = {**fidelity, **utility, **privacy, **global_utility}
+    
+    # Ensure JSON serializable
+    def make_serializable(obj):
+        if isinstance(obj, dict):
+            return {k: make_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [make_serializable(v) for v in obj]
+        elif isinstance(obj, (np.int64, np.int32, np.int16, np.int8)):
+            return int(obj)
+        elif isinstance(obj, (np.float64, np.float32, np.float16)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj
+
+    res_serializable = make_serializable(res)
     with open(os.path.join(args.output_dir, 'evaluation_metrics.json'), 'w') as f:
-        json.dump(res, f, indent=2)
+        json.dump(res_serializable, f, indent=2)
         
     # Plots
     if len(eval_synthetic_data) > 0:
         evaluator.plot_correlation_difference(os.path.join(args.output_dir, 'correlation_diff.png'))
-
-    # Relationship Report
-    print("Generating Relationship Report...")
-    report = evaluator.generate_relationship_report(data_type='synthetic')
-    with open(os.path.join(args.output_dir, 'relationship_report.txt'), 'w') as f:
-        f.write(report)
-    print(f"Saved relationship report to {os.path.join(args.output_dir, 'relationship_report.txt')}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -355,6 +371,8 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', type=str, default='outputs')
     parser.add_argument('--num_samples', type=int, default=1000)
     parser.add_argument('--batch_size', type=int, default=1000)
+    parser.add_argument('--num_inference_steps', type=int, default=None, help='Number of DDIM inference steps (e.g., 50)')
+    parser.add_argument('--eta', type=float, default=0.0, help='DDIM eta parameter (0 for deterministic, 1 for DDPM)')
     parser.add_argument('--guidance_scale', type=float, default=1.0)
     parser.add_argument('--condition_col', type=str, default=None)
     parser.add_argument('--constraint', type=str, action='append', help='Add a constraint in format column=value. Can be used multiple times.')
