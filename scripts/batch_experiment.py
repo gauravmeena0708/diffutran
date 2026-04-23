@@ -13,6 +13,16 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from scripts.experiment_utils import calculate_csr_from_constraint_strings
 
+# ── Sampling variant configs ────────────────────────────────────────────────────
+DSFLOW_CONFIGS = [
+    {"solver": "dpm++", "steps": 10, "label": "dsflow-dpm++"},
+    {"solver": "euler",  "steps": 20, "label": "dsflow-euler"},
+]
+DIFFUTRON_CONFIGS = [
+    {"eta": 0.0, "steps": 50,   "label": "diffutron-ddim"},
+    {"eta": 1.0, "steps": 1000, "label": "diffutron-ddpm"},
+]
+
 def run_command(cmd, desc):
     print(f"--- {desc} ---")
     print(f"Running: {' '.join(cmd)}")
@@ -97,66 +107,68 @@ def main(args):
                 
             run_command(train_m1_cmd, f"Training DiffuTron on {ds}")
             
-        # 3. Sample DS-Flow
+        # 3. Sample all variants — each in its own subdir to avoid filename collisions
         syn_ds_dir = os.path.join(base_syn_dir, ds)
         os.makedirs(syn_ds_dir, exist_ok=True)
-        
-        n_samp = 100 if args.debug else 1000
-        
-        start_ds = time.time()
-        sample_cmd = [
-            "python", "-m", "src.flow_model.sampler",
-            "--checkpoint_path", os.path.join(ds_model_dir, "model_final.pt"),
-            "--tokenizer_path", os.path.join(ds_model_dir, "tokenizer.pt"),
-            "--dataset_name", ds,
-            "--output_dir", syn_ds_dir,
-            "--num_samples", str(n_samp),
-            "--steps", "10",
-            "--solver", "dpm++",
-            "--d_model", "128" if args.debug else "512"
-        ]
-        if target_col:
-            sample_cmd.extend(["--condition_col", target_col])
-        if constraint_col and constraint_val:
-            sample_cmd.extend(["--constraint", f"{constraint_col}={constraint_val}"])
-            
-        run_command(sample_cmd, f"Sampling DS-Flow for {ds}")
-        ds_eff = (time.time() - start_ds) / (n_samp / 1000)
 
-        # 4. Sample DiffuTron
-        m1_eff = 0
-        if not is_temporal:
-            start_m1 = time.time()
-            sample_m1_cmd = [
-                "python", "scripts/generate_test.py",
-                "--checkpoint_path", os.path.join(m1_model_dir, "checkpoint_epoch_final.pt"),
-                "--preprocessor_path", os.path.join(m1_model_dir, "preprocessor.json"),
-                "--condition_encoder_path", os.path.join(m1_model_dir, "condition_encoder.json"),
-                "--real_data_path", data_path,
-                "--output_dir", syn_ds_dir,
+        n_samp = 100 if args.debug else 1000
+        current_constraints = [f"{constraint_col}={constraint_val}"] if constraint_col else []
+        variant_outputs = []  # (label, sf_path, eff)
+
+        for cfg in DSFLOW_CONFIGS:
+            variant_dir = os.path.join(syn_ds_dir, cfg["label"])
+            os.makedirs(variant_dir, exist_ok=True)
+            start = time.time()
+            cmd = [
+                "python", "-m", "src.flow_model.sampler",
+                "--checkpoint_path", os.path.join(ds_model_dir, "model_final.pt"),
+                "--tokenizer_path", os.path.join(ds_model_dir, "tokenizer.pt"),
+                "--dataset_name", ds,
+                "--output_dir", variant_dir,
                 "--num_samples", str(n_samp),
-                "--num_inference_steps", "20",
-                "--eta", "0.0",
-                "--hidden_dim", "128" if args.debug else "256"
+                "--steps", str(cfg["steps"]),
+                "--solver", cfg["solver"],
+                "--d_model", "128" if args.debug else "512",
             ]
             if target_col:
-                sample_m1_cmd.extend(["--condition_col", target_col])
+                cmd.extend(["--condition_col", target_col])
             if constraint_col and constraint_val:
-                sample_m1_cmd.extend(["--constraint", f"{constraint_col}={constraint_val}"])
-                
-            run_command(sample_m1_cmd, f"Sampling DiffuTron for {ds}")
-            m1_eff = (time.time() - start_m1) / (n_samp / 1000)
+                cmd.extend(["--constraint", f"{constraint_col}={constraint_val}"])
+            run_command(cmd, f"Sampling {cfg['label']} for {ds}")
+            eff = (time.time() - start) / (n_samp / 1000)
+            files = sorted(f for f in os.listdir(variant_dir) if f.endswith(".csv"))
+            if files:
+                variant_outputs.append((cfg["label"], os.path.join(variant_dir, files[-1]), eff))
 
-        # 5. Evaluate
-        syn_files = [f for f in os.listdir(syn_ds_dir) if f.endswith(".csv")]
-        for sf in syn_files:
-            sf_path = os.path.join(syn_ds_dir, sf)
-            method = "dsflow" if "flow_model" in sf else "diffutron"
-            eff = ds_eff if method == "dsflow" else m1_eff
-            
-            # Constraints for CSR
-            current_constraints = [f"{constraint_col}={constraint_val}"] if constraint_col else []
-            
+        if not is_temporal:
+            for cfg in DIFFUTRON_CONFIGS:
+                variant_dir = os.path.join(syn_ds_dir, cfg["label"])
+                os.makedirs(variant_dir, exist_ok=True)
+                start = time.time()
+                cmd = [
+                    "python", "scripts/generate_test.py",
+                    "--checkpoint_path", os.path.join(m1_model_dir, "checkpoint_epoch_final.pt"),
+                    "--preprocessor_path", os.path.join(m1_model_dir, "preprocessor.json"),
+                    "--condition_encoder_path", os.path.join(m1_model_dir, "condition_encoder.json"),
+                    "--real_data_path", data_path,
+                    "--output_dir", variant_dir,
+                    "--num_samples", str(n_samp),
+                    "--num_inference_steps", str(cfg["steps"]),
+                    "--eta", str(cfg["eta"]),
+                    "--hidden_dim", "128" if args.debug else "256",
+                ]
+                if target_col:
+                    cmd.extend(["--condition_col", target_col])
+                if constraint_col and constraint_val:
+                    cmd.extend(["--constraint", f"{constraint_col}={constraint_val}"])
+                run_command(cmd, f"Sampling {cfg['label']} for {ds}")
+                eff = (time.time() - start) / (n_samp / 1000)
+                files = sorted(f for f in os.listdir(variant_dir) if f.endswith(".csv"))
+                if files:
+                    variant_outputs.append((cfg["label"], os.path.join(variant_dir, files[-1]), eff))
+
+        # 4. Evaluate each variant
+        for method_label, sf_path, eff in variant_outputs:
             eval_cmd = [
                 "python", "-c", f"""
 import pandas as pd
@@ -170,11 +182,9 @@ import json
 real = pd.read_csv('{data_path}')
 syn = pd.read_csv('{sf_path}')
 
-# CSR
 constraints = {current_constraints}
 csr_score, _, _ = calculate_csr_from_constraint_strings(syn, constraints)
 
-# Clean temporal
 if 'seq_id' in real.columns: real = real.drop(columns=['seq_id', 'time_step'])
 if 'seq_id' in syn.columns: syn = syn.drop(columns=['seq_id', 'time_step'])
 
@@ -191,7 +201,7 @@ cov_avg = sum(div.values()) / (len(div) or 1)
 
 result = {{
     'dataset': '{ds}',
-    'method': '{method}',
+    'method': '{method_label}',
     'avg_ks': round(ks_avg, 4),
     'tstr': round(tstr, 4),
     'csr': round(csr_score, 2),
@@ -202,11 +212,11 @@ result = {{
 print(json.dumps(result))
 """
             ]
-            res = run_command(eval_cmd, f"Evaluating {sf}")
+            res = run_command(eval_cmd, f"Evaluating {method_label} on {ds}")
             if res.returncode == 0:
                 try:
                     all_results.append(json.loads(res.stdout.splitlines()[-1]))
-                except:
+                except Exception:
                     pass
 
     # Save Aggregate Results
