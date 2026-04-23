@@ -23,6 +23,10 @@ DIFFUTRON_CONFIGS = [
     {"eta": 1.0, "steps": 1000, "label": "diffutron-ddpm"},
 ]
 
+def _needs_training(model_dir: str, artifacts: list) -> bool:
+    """Return True if any required checkpoint artifact is missing."""
+    return not all(os.path.exists(os.path.join(model_dir, a)) for a in artifacts)
+
 def run_command(cmd, desc):
     print(f"--- {desc} ---")
     print(f"Running: {' '.join(cmd)}")

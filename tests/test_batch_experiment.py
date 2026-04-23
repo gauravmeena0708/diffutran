@@ -26,3 +26,26 @@ def test_dsflow_euler_steps():
     euler = next(c for c in DSFLOW_CONFIGS if c["label"] == "dsflow-euler")
     assert euler["steps"] == 20
     assert euler["solver"] == "euler"
+
+
+import tempfile
+from scripts.batch_experiment import _needs_training
+
+
+def test_needs_training_missing_artifact():
+    with tempfile.TemporaryDirectory() as d:
+        assert _needs_training(d, ["model.pt"]) is True
+
+
+def test_needs_training_all_present():
+    with tempfile.TemporaryDirectory() as d:
+        open(os.path.join(d, "model.pt"), "w").close()
+        open(os.path.join(d, "tokenizer.pt"), "w").close()
+        assert _needs_training(d, ["model.pt", "tokenizer.pt"]) is False
+
+
+def test_needs_training_partial():
+    with tempfile.TemporaryDirectory() as d:
+        open(os.path.join(d, "model.pt"), "w").close()
+        # tokenizer.pt is absent
+        assert _needs_training(d, ["model.pt", "tokenizer.pt"]) is True
