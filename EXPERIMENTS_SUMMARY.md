@@ -98,3 +98,93 @@ python scripts/report_cli.py run-bundle --run-dir "$RUN" \
   --methods tabdiff-none guided-v1 diffutran-ddpm diffuflow-euler diffuflow-dpm++ diffutran-ddim \
   --significance --significance-metrics composite csr alpha wasserstein tstr
 ```
+
+## Are These Methods Useful?
+
+Yes, but currently as experimental baselines and ablation candidates rather than
+as the strongest methods in the framework.
+
+| Method | Current usefulness | Reason |
+|---|---|---|
+| `diffuflow-euler` | Most useful new variant | Best speed/quality tradeoff among the new variants: close to `diffutran-ddpm` quality with much lower sampling time. |
+| `diffutran-ddpm` | Useful quality reference | Best DiffuTran/DiffuFlow composite score, but much slower at 10000 samples. |
+| `diffuflow-dpm++` | Solver ablation | Similar to Euler but slightly weaker in the six-method pilot. Keep only if comparing flow solvers. |
+| `diffutran-ddim` | DDIM ablation | Fast enough, but weakest composite score among the four new variants. |
+
+For the six-method adult pilot, `tabdiff-none` and `guided-v1` remain stronger
+baselines. The useful claim for now is: DiffuTran/DiffuFlow variants are viable
+and satisfy constraints, but they have not yet beaten TabDiff or Guided in this
+pilot.
+
+Important caveat: this conclusion is based only on `adult` with four
+constraints. Do not make a final paper-level claim until the methods are tested
+across more datasets, more constraints, and pairwise significance tests.
+
+## Next Step: Complete Single-Constraint Benchmark
+
+Goal: run a complete single-constraint benchmark to decide whether
+`diffutran-ddpm` and `diffuflow-euler` remain useful beyond the small adult
+pilot.
+
+Recommended first full run:
+
+- Datasets: 5 datasets first, then expand to 10 if results are stable.
+- Constraint type: single constraints only.
+- Methods: `tabdiff-none`, `guided-v1`, `diffutran-ddpm`, `diffuflow-euler`.
+- Optional ablations: add `diffuflow-dpm++` and `diffutran-ddim` only if solver
+  or sampler comparison is needed.
+- Samples: use the intended final sample size, e.g. `10000`, not the 100-sample
+  smoke setting.
+- Evaluation: include csdeval metrics and generate the standard report bundle.
+
+Suggested 5-dataset command:
+
+```bash
+cd /data/syntab/Gaurav/base_test2
+
+python scripts/run_comprehensive_benchmark.py \
+  --datasets adult german compas shoppers beijing \
+  --methods tabdiff-none guided-v1 diffutran-ddpm diffuflow-euler \
+  --mode generate_then_eval \
+  --experiment-profile diffutran_four_variant \
+  --constraint-type single \
+  --n-samples 10000 \
+  --output-dir workdir/runs/diffutran_single_5ds
+```
+
+Suggested 10-dataset command:
+
+```bash
+cd /data/syntab/Gaurav/base_test2
+
+python scripts/run_comprehensive_benchmark.py \
+  --datasets adult german compas shoppers beijing default health_heritage law_school bank_marketing telco_churn \
+  --methods tabdiff-none guided-v1 diffutran-ddpm diffuflow-euler \
+  --mode generate_then_eval \
+  --experiment-profile diffutran_four_variant \
+  --constraint-type single \
+  --n-samples 10000 \
+  --output-dir workdir/runs/diffutran_single_10ds
+```
+
+After the run finishes, generate the reporting bundle:
+
+```bash
+RUN=workdir/runs/diffutran_single_5ds
+python scripts/report_cli.py run-bundle --run-dir "$RUN" \
+  --methods tabdiff-none guided-v1 diffutran-ddpm diffuflow-euler \
+  --significance --significance-metrics composite csr alpha wasserstein tstr
+```
+
+Use `RUN=workdir/runs/diffutran_single_10ds` for the 10-dataset run.
+
+Decision rule after the full run:
+
+- Keep `diffuflow-euler` if it stays close to `guided-v1` while remaining much
+  faster than `diffutran-ddpm`.
+- Keep `diffutran-ddpm` if it consistently beats `diffuflow-euler` on composite
+  or fidelity enough to justify the runtime.
+- Drop `diffutran-ddim` unless it becomes clearly useful on speed-sensitive
+  runs.
+- Drop `diffuflow-dpm++` unless it beats Euler on multiple datasets or is needed
+  for a solver ablation table.
