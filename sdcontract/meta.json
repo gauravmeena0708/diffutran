@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "plugin": "diffutran",
+  "version": "0.1.0",
+  "env": "diffutabgen",
+  "entrypoints": {
+    "train": ["python", "sdcontract/train"],
+    "generate": ["python", "sdcontract/generate"]
+  },
+  "methods": {
+    "diffutran": { "variant": null }
+  }
+}
